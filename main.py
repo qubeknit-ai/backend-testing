@@ -209,7 +209,8 @@ async def get_leads(db: Session = Depends(get_db)):
             return {"leads": []}
         
         from models import Lead
-        leads = db.query(Lead).order_by(Lead.created_at.desc()).all()
+        # Order by updated_at to show most recently updated leads first
+        leads = db.query(Lead).order_by(Lead.updated_at.desc()).all()
         return {
             "leads": [
                 {
@@ -224,7 +225,8 @@ async def get_leads(db: Session = Depends(get_db)):
                     "description": lead.description,
                     "Proposal": lead.proposal,
                     "url": lead.url,
-                    "created_at": lead.created_at.isoformat() if lead.created_at else None
+                    "created_at": lead.created_at.isoformat() if lead.created_at else None,
+                    "updated_at": lead.updated_at.isoformat() if lead.updated_at else None
                 }
                 for lead in leads
             ]
@@ -330,6 +332,109 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
             "platform_distribution": [],
             "timeline_data": []
         }
+
+@app.put("/api/leads/{lead_id}/proposal")
+async def update_lead_proposal(
+    lead_id: int,
+    proposal_data: dict,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import Lead
+        
+        # Find the lead
+        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        
+        # Update the proposal
+        lead.proposal = proposal_data.get("proposal", "")
+        lead.updated_at = datetime.utcnow()
+        
+        db.commit()
+        db.refresh(lead)
+        
+        print(f"Updated proposal for lead {lead_id}")
+        return {
+            "success": True,
+            "message": "Proposal updated successfully",
+            "lead": {
+                "id": lead.id,
+                "platform": lead.platform,
+                "title": lead.title,
+                "budget": lead.budget,
+                "posted": lead.posted,
+                "posted_time": lead.posted_time.isoformat() if lead.posted_time else None,
+                "status": lead.status,
+                "score": lead.score,
+                "description": lead.description,
+                "Proposal": lead.proposal,
+                "url": lead.url,
+                "updated_at": lead.updated_at.isoformat() if lead.updated_at else None
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating proposal: {e}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/leads/{lead_id}/approve")
+async def approve_lead(
+    lead_id: int,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import Lead
+        
+        # Find the lead
+        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        
+        # Update the status to Approved
+        lead.status = "Approved"
+        lead.updated_at = datetime.utcnow()
+        
+        db.commit()
+        db.refresh(lead)
+        
+        print(f"Approved lead {lead_id}")
+        return {
+            "success": True,
+            "message": "Lead approved successfully",
+            "lead": {
+                "id": lead.id,
+                "platform": lead.platform,
+                "title": lead.title,
+                "budget": lead.budget,
+                "posted": lead.posted,
+                "posted_time": lead.posted_time.isoformat() if lead.posted_time else None,
+                "status": lead.status,
+                "score": lead.score,
+                "description": lead.description,
+                "Proposal": lead.proposal,
+                "url": lead.url,
+                "updated_at": lead.updated_at.isoformat() if lead.updated_at else None
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error approving lead: {e}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/leads/clean")
 async def clean_leads(email: str = Depends(verify_token), db: Session = Depends(get_db)):
