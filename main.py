@@ -49,11 +49,22 @@ app.add_middleware(
 @app.post("/api/sync-send")
 async def sync_send(payload: dict, db: Session = Depends(get_db)):
     try:
+        # Prepare headers with authentication
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        # Add API key if configured
+        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+            # Alternative: headers["Authorization"] = f"Bearer {api_key}"
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 os.getenv("N8N_SEND_WEBHOOK_URL"),
                 json=payload,
-                headers={"Content-Type": "application/json"}
+                headers=headers
             )
             return response.json()
     except Exception as e:
@@ -63,8 +74,21 @@ async def sync_send(payload: dict, db: Session = Depends(get_db)):
 async def sync_receive(db: Session = Depends(get_db)):
     try:
         print(f"Fetching from: {os.getenv('N8N_RECEIVE_WEBHOOK_URL')}")
+        
+        # Prepare headers with authentication
+        headers = {"Content-Type": "application/json"}
+        
+        # Add API key if configured
+        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(os.getenv("N8N_RECEIVE_WEBHOOK_URL"))
+            # Changed to POST to match the webhook configuration
+            response = await client.post(
+                os.getenv("N8N_RECEIVE_WEBHOOK_URL"),
+                headers=headers
+            )
             print(f"Response status: {response.status_code}")
             print(f"Response content: {response.text[:200]}")
             
@@ -153,25 +177,50 @@ async def fetch_upwork(db: Session = Depends(get_db)):
         if not webhook_url:
             raise HTTPException(status_code=500, detail="UPWORK_WEBHOOK_URL not configured in environment")
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Prepare headers with authentication
+        headers = {"Content-Type": "application/json"}
+        
+        # Add API key if configured
+        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+            print(f"Using API key authentication: {api_key[:10]}...")
+        else:
+            print("WARNING: N8N_WEBHOOK_API_KEY not set - webhook may fail authentication")
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 webhook_url,
-                headers={"Content-Type": "application/json"}
+                headers=headers
             )
             print(f"Upwork webhook response status: {response.status_code}")
-            print(f"Upwork webhook response: {response.text[:200] if response.text else 'empty'}")
+            print(f"Upwork webhook response: {response.text[:500] if response.text else 'empty'}")
             
+            # Check if response contains N8N workflow error
             if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail=f"Upwork webhook failed: {response.text}")
+                error_detail = response.text
+                try:
+                    error_json = response.json()
+                    if "Unused Respond to Webhook" in str(error_json):
+                        error_detail = "N8N Workflow Error: Please remove or properly connect the 'Respond to Webhook' node in your Upwork workflow"
+                    elif "not registered" in str(error_json):
+                        error_detail = f"N8N Webhook Not Found: The webhook at '{webhook_url}' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
+                    elif error_json.get("message"):
+                        error_detail = f"N8N Error: {error_json.get('message')}"
+                except:
+                    pass
+                raise HTTPException(status_code=response.status_code, detail=error_detail)
             
-            return {"success": True, "message": "Upwork jobs fetch triggered", "status": response.status_code}
+            return {"success": True, "message": "Upwork jobs fetch triggered successfully", "status": response.status_code}
     except HTTPException:
         raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Upwork webhook timeout - workflow may still be processing")
     except Exception as e:
         print(f"Error triggering Upwork webhook: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to trigger Upwork webhook: {str(e)}")
 
 @app.post("/api/fetch-freelancer")
 async def fetch_freelancer(db: Session = Depends(get_db)):
@@ -182,25 +231,50 @@ async def fetch_freelancer(db: Session = Depends(get_db)):
         if not webhook_url:
             raise HTTPException(status_code=500, detail="FREELANCER_WEBHOOK_URL not configured in environment")
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Prepare headers with authentication
+        headers = {"Content-Type": "application/json"}
+        
+        # Add API key if configured
+        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+            print(f"Using API key authentication: {api_key[:10]}...")
+        else:
+            print("WARNING: N8N_WEBHOOK_API_KEY not set - webhook may fail authentication")
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 webhook_url,
-                headers={"Content-Type": "application/json"}
+                headers=headers
             )
             print(f"Freelancer webhook response status: {response.status_code}")
-            print(f"Freelancer webhook response: {response.text[:200] if response.text else 'empty'}")
+            print(f"Freelancer webhook response: {response.text[:500] if response.text else 'empty'}")
             
+            # Check if response contains N8N workflow error
             if response.status_code != 200:
-                raise HTTPException(status_code=response.status_code, detail=f"Freelancer webhook failed: {response.text}")
+                error_detail = response.text
+                try:
+                    error_json = response.json()
+                    if "Unused Respond to Webhook" in str(error_json):
+                        error_detail = "N8N Workflow Error: Please remove or properly connect the 'Respond to Webhook' node in your Freelancer workflow"
+                    elif "not registered" in str(error_json):
+                        error_detail = f"N8N Webhook Not Found: The webhook at '{webhook_url}' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
+                    elif error_json.get("message"):
+                        error_detail = f"N8N Error: {error_json.get('message')}"
+                except:
+                    pass
+                raise HTTPException(status_code=response.status_code, detail=error_detail)
             
-            return {"success": True, "message": "Freelancer jobs fetch triggered", "status": response.status_code}
+            return {"success": True, "message": "Freelancer jobs fetch triggered successfully", "status": response.status_code}
     except HTTPException:
         raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Freelancer webhook timeout - workflow may still be processing")
     except Exception as e:
         print(f"Error triggering Freelancer webhook: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to trigger Freelancer webhook: {str(e)}")
 
 @app.get("/api/leads")
 async def get_leads(db: Session = Depends(get_db)):
@@ -336,7 +410,7 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         ai_drafted = len([l for l in all_leads if l.status == "AI Drafted"])
         approved = len([l for l in all_leads if l.status == "Approved"])
         
-        # Count low score leads (score < 7 or score is "—")
+        # Count Unqualified leads (score < 7 or score is "—")
         low_score = 0
         for lead in all_leads:
             try:
@@ -740,3 +814,150 @@ async def update_settings(
     db.refresh(settings)
     
     return settings
+
+
+# Notification endpoints
+@app.post("/api/notifications/webhook")
+async def receive_notification_webhook(payload: dict, db: Session = Depends(get_db)):
+    """
+    Receive notifications from n8n webhook
+    Expected payload: {
+        "type": "success|info|warning|error",
+        "title": "Notification Title",
+        "message": "Notification message"
+    }
+    """
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Notification
+        
+        notification = Notification(
+            type=payload.get("type", "info"),
+            title=payload.get("title", "Notification"),
+            message=payload.get("message", ""),
+            read=False
+        )
+        
+        db.add(notification)
+        db.commit()
+        db.refresh(notification)
+        
+        return {
+            "success": True,
+            "message": "Notification received",
+            "notification_id": notification.id
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save notification: {str(e)}")
+
+@app.get("/api/notifications")
+async def get_notifications(
+    limit: int = 50,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get all notifications, ordered by newest first"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Notification
+        
+        notifications = db.query(Notification)\
+            .order_by(Notification.created_at.desc())\
+            .limit(limit)\
+            .all()
+        
+        return {
+            "notifications": [
+                {
+                    "id": n.id,
+                    "type": n.type,
+                    "title": n.title,
+                    "message": n.message,
+                    "read": n.read,
+                    "created_at": n.created_at.isoformat() if n.created_at else None
+                }
+                for n in notifications
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch notifications: {str(e)}")
+
+@app.put("/api/notifications/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: int,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Mark a notification as read"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Notification
+        
+        notification = db.query(Notification).filter(Notification.id == notification_id).first()
+        if not notification:
+            raise HTTPException(status_code=404, detail="Notification not found")
+        
+        notification.read = True
+        notification.updated_at = datetime.utcnow()
+        db.commit()
+        
+        return {"success": True, "message": "Notification marked as read"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update notification: {str(e)}")
+
+@app.put("/api/notifications/mark-all-read")
+async def mark_all_notifications_read(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Mark all notifications as read"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Notification
+        
+        db.query(Notification).update({"read": True, "updated_at": datetime.utcnow()})
+        db.commit()
+        
+        return {"success": True, "message": "All notifications marked as read"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update notifications: {str(e)}")
+
+@app.delete("/api/notifications/{notification_id}")
+async def delete_notification(
+    notification_id: int,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Delete a notification"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Notification
+        
+        notification = db.query(Notification).filter(Notification.id == notification_id).first()
+        if not notification:
+            raise HTTPException(status_code=404, detail="Notification not found")
+        
+        db.delete(notification)
+        db.commit()
+        
+        return {"success": True, "message": "Notification deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete notification: {str(e)}")
