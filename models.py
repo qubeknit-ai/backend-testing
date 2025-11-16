@@ -101,3 +101,21 @@ class Notification(Base):
     
     # Relationship
     user = relationship("User", back_populates="notifications")
+
+class SystemSettings(Base):
+    __tablename__ = "system_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Default daily limits for new users
+    default_upwork_limit = Column(Integer, default=5)
+    default_freelancer_limit = Column(Integer, default=5)
+    default_freelancer_plus_limit = Column(Integer, default=3)
+    
+    # Webhook URLs (can be overridden from environment)
+    upwork_webhook_url = Column(String, nullable=True)
+    freelancer_webhook_url = Column(String, nullable=True)
+    freelancer_plus_webhook_url = Column(String, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -46,16 +46,32 @@ def get_user_by_email(email: str, db: Session):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
+def get_system_settings(db: Session):
+    """Get or create system settings"""
+    from models import SystemSettings
+    settings = db.query(SystemSettings).first()
+    if not settings:
+        settings = SystemSettings(
+            default_upwork_limit=5,
+            default_freelancer_limit=5,
+            default_freelancer_plus_limit=3
+        )
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
 def check_and_reset_daily_limit(user, platform: str, db: Session):
     """
     Check and reset daily limit for a platform if needed
     Returns (current_count, daily_limit, can_fetch)
     """
-    # Different limits per platform
+    # Get limits from system settings
+    system_settings = get_system_settings(db)
     LIMITS = {
-        "upwork": 5,
-        "freelancer": 5,
-        "freelancer_plus": 3
+        "upwork": system_settings.default_upwork_limit,
+        "freelancer": system_settings.default_freelancer_limit,
+        "freelancer_plus": system_settings.default_freelancer_plus_limit
     }
     DAILY_LIMIT = LIMITS.get(platform, 5)  # Default to 5 if platform not found
     now = datetime.utcnow()
@@ -1692,15 +1708,19 @@ async def reset_user_fetch_count(
 async def get_admin_settings(user = Depends(verify_admin), db: Session = Depends(get_db)):
     """Get system-wide settings"""
     try:
-        # For now, return environment-based settings
-        # In production, these could be stored in a database table
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        # Get settings from database
+        system_settings = get_system_settings(db)
+        
         return {
-            "default_upwork_limit": 5,
-            "default_freelancer_limit": 5,
-            "default_freelancer_plus_limit": 3,
-            "upwork_webhook_url": os.getenv("UPWORK_WEBHOOK_URL", ""),
-            "freelancer_webhook_url": os.getenv("FREELANCER_WEBHOOK_URL", ""),
-            "freelancer_plus_webhook_url": os.getenv("FREELANCER_PLUS_WEBHOOK_URL", "")
+            "default_upwork_limit": system_settings.default_upwork_limit,
+            "default_freelancer_limit": system_settings.default_freelancer_limit,
+            "default_freelancer_plus_limit": system_settings.default_freelancer_plus_limit,
+            "upwork_webhook_url": system_settings.upwork_webhook_url or os.getenv("UPWORK_WEBHOOK_URL", ""),
+            "freelancer_webhook_url": system_settings.freelancer_webhook_url or os.getenv("FREELANCER_WEBHOOK_URL", ""),
+            "freelancer_plus_webhook_url": system_settings.freelancer_plus_webhook_url or os.getenv("FREELANCER_PLUS_WEBHOOK_URL", "")
         }
     except Exception as e:
         print(f"Error fetching admin settings: {e}")
@@ -1714,16 +1734,47 @@ async def update_admin_settings(
 ):
     """Update system-wide settings"""
     try:
-        # For now, these settings are read from environment variables
-        # In production, you would store these in a database table
-        # and update them here
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        # Get or create system settings
+        system_settings = get_system_settings(db)
+        
+        # Update limits
+        if "default_upwork_limit" in settings_data:
+            system_settings.default_upwork_limit = settings_data["default_upwork_limit"]
+        if "default_freelancer_limit" in settings_data:
+            system_settings.default_freelancer_limit = settings_data["default_freelancer_limit"]
+        if "default_freelancer_plus_limit" in settings_data:
+            system_settings.default_freelancer_plus_limit = settings_data["default_freelancer_plus_limit"]
+        
+        # Update webhook URLs (optional - can still use env vars as fallback)
+        if "upwork_webhook_url" in settings_data:
+            system_settings.upwork_webhook_url = settings_data["upwork_webhook_url"]
+        if "freelancer_webhook_url" in settings_data:
+            system_settings.freelancer_webhook_url = settings_data["freelancer_webhook_url"]
+        if "freelancer_plus_webhook_url" in settings_data:
+            system_settings.freelancer_plus_webhook_url = settings_data["freelancer_plus_webhook_url"]
+        
+        system_settings.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(system_settings)
+        
+        print(f"✅ Admin settings updated: Upwork={system_settings.default_upwork_limit}, Freelancer={system_settings.default_freelancer_limit}, Freelancer+={system_settings.default_freelancer_plus_limit}")
         
         return {
             "success": True,
-            "message": "Settings updated successfully (Note: Webhook URLs are read from environment variables)"
+            "message": "Settings updated successfully",
+            "settings": {
+                "default_upwork_limit": system_settings.default_upwork_limit,
+                "default_freelancer_limit": system_settings.default_freelancer_limit,
+                "default_freelancer_plus_limit": system_settings.default_freelancer_plus_limit
+            }
         }
     except Exception as e:
         print(f"Error updating admin settings: {e}")
+        if db:
+            db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/admin/analytics")
