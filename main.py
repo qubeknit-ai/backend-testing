@@ -7,7 +7,7 @@ from datetime import datetime
 import httpx
 import os
 from dotenv import load_dotenv
-from schemas import UserSignup, UserLogin, Token, UserResponse, SettingsUpdate, SettingsResponse
+from schemas import UserSignup, UserLogin, Token, UserResponse, SettingsUpdate, SettingsResponse, UserProfileUpdate
 from auth import get_password_hash, verify_password, create_access_token, verify_token
 
 load_dotenv()
@@ -38,6 +38,68 @@ def get_db():
         if db is not None:
             db.close()
 
+def get_user_by_email(email: str, db: Session):
+    """Helper function to get current user from email"""
+    from models import User
+    user = db.query(User).filter(func.lower(User.email) == email.lower()).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+def check_and_reset_daily_limit(user, platform: str, db: Session):
+    """
+    Check and reset daily limit for a platform if needed
+    Returns (current_count, daily_limit, can_fetch)
+    """
+    # Different limits per platform
+    LIMITS = {
+        "upwork": 5,
+        "freelancer": 5,
+        "freelancer_plus": 3
+    }
+    DAILY_LIMIT = LIMITS.get(platform, 5)  # Default to 5 if platform not found
+    now = datetime.utcnow()
+    
+    # Get the appropriate fields based on platform
+    if platform == "upwork":
+        count_field = "upwork_fetch_count"
+        reset_field = "upwork_last_reset"
+    elif platform == "freelancer":
+        count_field = "freelancer_fetch_count"
+        reset_field = "freelancer_last_reset"
+    elif platform == "freelancer_plus":
+        count_field = "freelancer_plus_fetch_count"
+        reset_field = "freelancer_plus_last_reset"
+    else:
+        raise ValueError(f"Unknown platform: {platform}")
+    
+    last_reset = getattr(user, reset_field)
+    current_count = getattr(user, count_field) or 0
+    
+    # Check if it's a new day (reset at midnight UTC)
+    if last_reset:
+        last_reset_date = last_reset.date()
+        current_date = now.date()
+        
+        if current_date > last_reset_date:
+            # New day, reset counter
+            setattr(user, count_field, 0)
+            setattr(user, reset_field, now)
+            current_count = 0
+            db.commit()
+            print(f"Reset {platform} daily fetch count for user {user.email}")
+    else:
+        # First time fetching, initialize
+        setattr(user, reset_field, now)
+        setattr(user, count_field, 0)
+        current_count = 0
+        db.commit()
+    
+    can_fetch = current_count < DAILY_LIMIT
+    remaining = DAILY_LIMIT - current_count
+    
+    return current_count, DAILY_LIMIT, can_fetch, remaining
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,6 +107,107 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.post("/api/leads/bulk")
+async def receive_leads_from_n8n(payload: dict, db: Session = Depends(get_db)):
+    """
+    Endpoint for N8N to send scraped leads back to backend
+    Expected payload: {
+        "user_id": 1,
+        "leads": [
+            {
+                "platform": "Upwork",
+                "title": "Job Title",
+                "budget": "$500",
+                "posted": "2 hours ago",
+                "status": "Pending",
+                "score": "8",
+                "description": "Job description",
+                "url": "https://..."
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import Lead, Notification
+        from dateutil import parser
+        
+        user_id = payload.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        
+        leads_data = payload.get("leads", [])
+        if not leads_data:
+            return {"success": True, "message": "No leads to save", "count": 0}
+        
+        saved_count = 0
+        
+        for lead_data in leads_data:
+            # Skip if lead doesn't have essential data
+            title = lead_data.get("title", lead_data.get("titlle"))
+            platform = lead_data.get("platform")
+            
+            if not title or not platform:
+                print(f"Skipping lead with missing title or platform: {lead_data}")
+                continue
+            
+            # Check if lead already exists by title and platform for this user
+            existing_lead = db.query(Lead).filter(
+                Lead.user_id == user_id,
+                Lead.title == title,
+                Lead.platform == platform
+            ).first()
+            
+            if not existing_lead:
+                # Parse posted_time if available
+                posted_time = None
+                if lead_data.get("posted_time"):
+                    try:
+                        posted_time = parser.parse(lead_data.get("posted_time"))
+                    except:
+                        posted_time = None
+                
+                new_lead = Lead(
+                    user_id=user_id,
+                    platform=platform,
+                    title=title,
+                    budget=str(lead_data.get("budget", "")),
+                    posted=lead_data.get("posted", ""),
+                    posted_time=posted_time,
+                    status=lead_data.get("status", "Pending"),
+                    score=str(lead_data.get("Score", lead_data.get("score", "—"))),
+                    description=lead_data.get("description", ""),
+                    proposal=lead_data.get("Proposal", ""),
+                    url=lead_data.get("url", "")
+                )
+                db.add(new_lead)
+                saved_count += 1
+        
+        db.commit()
+        
+        # Create notification for user
+        if saved_count > 0:
+            notification = Notification(
+                user_id=user_id,
+                type="success",
+                title="Jobs Fetched Successfully",
+                message=f"Successfully fetched {saved_count} new jobs from {leads_data[0].get('platform', 'platform')}"
+            )
+            db.add(notification)
+            db.commit()
+        
+        print(f"✅ Saved {saved_count} leads for user_id={user_id}")
+        return {"success": True, "message": f"Saved {saved_count} leads", "count": saved_count}
+        
+    except Exception as e:
+        print(f"Error saving leads from N8N: {str(e)}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/sync-send")
 async def sync_send(payload: dict, db: Session = Depends(get_db)):
@@ -71,9 +234,18 @@ async def sync_send(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/sync-receive")
-async def sync_receive(db: Session = Depends(get_db)):
+async def sync_receive(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    """
+    Legacy endpoint - now requires authentication
+    Fetches leads and saves them for the current user
+    """
     try:
-        print(f"Fetching from: {os.getenv('N8N_RECEIVE_WEBHOOK_URL')}")
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        user = get_user_by_email(email, db)
+        
+        print(f"Fetching from: {os.getenv('N8N_RECEIVE_WEBHOOK_URL')} for user {user.email}")
         
         # Prepare headers with authentication
         headers = {"Content-Type": "application/json"}
@@ -109,54 +281,55 @@ async def sync_receive(db: Session = Depends(get_db)):
             
             print(f"Received {len(leads_data) if isinstance(leads_data, list) else 'unknown'} leads")
             
-            # Save leads to database if connection is available
-            if db is not None:
-                try:
-                    from models import Lead
-                    for lead_data in leads_data:
-                        # Skip if lead doesn't have essential data
-                        title = lead_data.get("title", lead_data.get("titlle"))
-                        platform = lead_data.get("platform")
-                        
-                        if not title or not platform:
-                            print(f"Skipping lead with missing title or platform: {lead_data}")
-                            continue
-                        
-                        # Check if lead already exists by title and platform
-                        existing_lead = db.query(Lead).filter(
-                            Lead.title == title,
-                            Lead.platform == platform
-                        ).first()
-                        
-                        if not existing_lead:
-                            # Parse posted_time if available
-                            posted_time = None
-                            if lead_data.get("posted_time"):
-                                try:
-                                    from dateutil import parser
-                                    posted_time = parser.parse(lead_data.get("posted_time"))
-                                except:
-                                    posted_time = None
-                            
-                            new_lead = Lead(
-                                platform=platform,
-                                title=title,
-                                budget=str(lead_data.get("budget", "")),
-                                posted=lead_data.get("posted", ""),
-                                posted_time=posted_time,
-                                status=lead_data.get("status", "Pending"),
-                                score=str(lead_data.get("Score", lead_data.get("score", "—"))),
-                                description=lead_data.get("description", ""),
-                                proposal=lead_data.get("Proposal", ""),
-                                url=lead_data.get("url", "")
-                            )
-                            db.add(new_lead)
+            # Save leads to database for current user
+            try:
+                from models import Lead
+                for lead_data in leads_data:
+                    # Skip if lead doesn't have essential data
+                    title = lead_data.get("title", lead_data.get("titlle"))
+                    platform = lead_data.get("platform")
                     
-                    db.commit()
-                except Exception as db_error:
-                    print(f"Database save failed: {db_error}")
-                    if db:
-                        db.rollback()
+                    if not title or not platform:
+                        print(f"Skipping lead with missing title or platform: {lead_data}")
+                        continue
+                    
+                    # Check if lead already exists by title and platform for this user
+                    existing_lead = db.query(Lead).filter(
+                        Lead.user_id == user.id,
+                        Lead.title == title,
+                        Lead.platform == platform
+                    ).first()
+                    
+                    if not existing_lead:
+                        # Parse posted_time if available
+                        posted_time = None
+                        if lead_data.get("posted_time"):
+                            try:
+                                from dateutil import parser
+                                posted_time = parser.parse(lead_data.get("posted_time"))
+                            except:
+                                posted_time = None
+                        
+                        new_lead = Lead(
+                            user_id=user.id,
+                            platform=platform,
+                            title=title,
+                            budget=str(lead_data.get("budget", "")),
+                            posted=lead_data.get("posted", ""),
+                            posted_time=posted_time,
+                            status=lead_data.get("status", "Pending"),
+                            score=str(lead_data.get("Score", lead_data.get("score", "—"))),
+                            description=lead_data.get("description", ""),
+                            proposal=lead_data.get("Proposal", ""),
+                            url=lead_data.get("url", "")
+                        )
+                        db.add(new_lead)
+                
+                db.commit()
+            except Exception as db_error:
+                print(f"Database save failed: {db_error}")
+                if db:
+                    db.rollback()
             
             return leads_data
     except httpx.TimeoutException as e:
@@ -169,13 +342,44 @@ async def sync_receive(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/fetch-upwork")
-async def fetch_upwork(db: Session = Depends(get_db)):
+async def fetch_upwork(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import UserSettings
+        user = get_user_by_email(email, db)
+        
+        # Check and reset daily limit if needed
+        current_count, daily_limit, can_fetch, remaining = check_and_reset_daily_limit(user, "upwork", db)
+        
+        if not can_fetch:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Daily limit reached. You can fetch Upwork jobs {daily_limit} times per day. Limit resets at midnight UTC."
+            )
+        
+        # Get user's settings
+        settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+        if not settings:
+            raise HTTPException(status_code=400, detail="User settings not found. Please configure settings first.")
+        
         webhook_url = os.getenv("UPWORK_WEBHOOK_URL")
-        print(f"Triggering Upwork webhook: {webhook_url}")
+        print(f"Triggering Upwork webhook for user {user.email}: {webhook_url}")
         
         if not webhook_url:
             raise HTTPException(status_code=500, detail="UPWORK_WEBHOOK_URL not configured in environment")
+        
+        # Prepare payload with user context
+        payload = {
+            "user_id": user.id,
+            "user_email": user.email,
+            "settings": {
+                "job_categories": settings.upwork_job_categories,
+                "max_jobs": settings.upwork_max_jobs,
+                "payment_verified": settings.upwork_payment_verified
+            }
+        }
         
         # Prepare headers with authentication
         headers = {"Content-Type": "application/json"}
@@ -191,6 +395,7 @@ async def fetch_upwork(db: Session = Depends(get_db)):
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 webhook_url,
+                json=payload,
                 headers=headers
             )
             print(f"Upwork webhook response status: {response.status_code}")
@@ -211,7 +416,21 @@ async def fetch_upwork(db: Session = Depends(get_db)):
                     pass
                 raise HTTPException(status_code=response.status_code, detail=error_detail)
             
-            return {"success": True, "message": "Upwork jobs fetch triggered successfully", "status": response.status_code}
+            # Increment fetch count after successful fetch
+            user.upwork_fetch_count += 1
+            db.commit()
+            
+            remaining = daily_limit - user.upwork_fetch_count
+            print(f"User {user.email} fetched Upwork. Count: {user.upwork_fetch_count}/{daily_limit}, Remaining: {remaining}")
+            
+            return {
+                "success": True,
+                "message": "Upwork jobs fetch triggered successfully",
+                "status": response.status_code,
+                "fetch_count": user.upwork_fetch_count,
+                "daily_limit": daily_limit,
+                "remaining": remaining
+            }
     except HTTPException:
         raise
     except httpx.TimeoutException:
@@ -223,13 +442,43 @@ async def fetch_upwork(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to trigger Upwork webhook: {str(e)}")
 
 @app.post("/api/fetch-freelancer")
-async def fetch_freelancer(db: Session = Depends(get_db)):
+async def fetch_freelancer(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import UserSettings
+        user = get_user_by_email(email, db)
+        
+        # Check and reset daily limit if needed
+        current_count, daily_limit, can_fetch, remaining = check_and_reset_daily_limit(user, "freelancer", db)
+        
+        if not can_fetch:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Daily limit reached. You can fetch Freelancer jobs {daily_limit} times per day. Limit resets at midnight UTC."
+            )
+        
+        # Get user's settings
+        settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+        if not settings:
+            raise HTTPException(status_code=400, detail="User settings not found. Please configure settings first.")
+        
         webhook_url = os.getenv("FREELANCER_WEBHOOK_URL")
-        print(f"Triggering Freelancer webhook: {webhook_url}")
+        print(f"Triggering Freelancer webhook for user {user.email}: {webhook_url}")
         
         if not webhook_url:
             raise HTTPException(status_code=500, detail="FREELANCER_WEBHOOK_URL not configured in environment")
+        
+        # Prepare payload with user context
+        payload = {
+            "user_id": user.id,
+            "user_email": user.email,
+            "settings": {
+                "job_category": settings.freelancer_job_category,
+                "max_jobs": settings.freelancer_max_jobs
+            }
+        }
         
         # Prepare headers with authentication
         headers = {"Content-Type": "application/json"}
@@ -245,6 +494,7 @@ async def fetch_freelancer(db: Session = Depends(get_db)):
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 webhook_url,
+                json=payload,
                 headers=headers
             )
             print(f"Freelancer webhook response status: {response.status_code}")
@@ -265,7 +515,21 @@ async def fetch_freelancer(db: Session = Depends(get_db)):
                     pass
                 raise HTTPException(status_code=response.status_code, detail=error_detail)
             
-            return {"success": True, "message": "Freelancer jobs fetch triggered successfully", "status": response.status_code}
+            # Increment fetch count after successful fetch
+            user.freelancer_fetch_count += 1
+            db.commit()
+            
+            remaining = daily_limit - user.freelancer_fetch_count
+            print(f"User {user.email} fetched Freelancer. Count: {user.freelancer_fetch_count}/{daily_limit}, Remaining: {remaining}")
+            
+            return {
+                "success": True,
+                "message": "Freelancer jobs fetch triggered successfully",
+                "status": response.status_code,
+                "fetch_count": user.freelancer_fetch_count,
+                "daily_limit": daily_limit,
+                "remaining": remaining
+            }
     except HTTPException:
         raise
     except httpx.TimeoutException:
@@ -276,15 +540,169 @@ async def fetch_freelancer(db: Session = Depends(get_db)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to trigger Freelancer webhook: {str(e)}")
 
+@app.post("/api/fetch-freelancer-plus")
+async def fetch_freelancer_plus(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import UserSettings
+        user = get_user_by_email(email, db)
+        
+        # Check and reset daily limit if needed
+        current_count, daily_limit, can_fetch, remaining = check_and_reset_daily_limit(user, "freelancer_plus", db)
+        
+        if not can_fetch:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Daily limit reached. You can fetch Freelancer Plus jobs {daily_limit} times per day. Limit resets at midnight UTC."
+            )
+        
+        # Get user's settings
+        settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+        if not settings:
+            raise HTTPException(status_code=400, detail="User settings not found. Please configure settings first.")
+        
+        webhook_url = os.getenv("FREELANCER_PLUS_WEBHOOK_URL")
+        print(f"Triggering Freelancer Plus webhook for user {user.email}: {webhook_url}")
+        
+        if not webhook_url:
+            raise HTTPException(status_code=500, detail="FREELANCER_PLUS_WEBHOOK_URL not configured in environment")
+        
+        # Prepare payload with user context
+        payload = {
+            "user_id": user.id,
+            "user_email": user.email,
+            "settings": {
+                "job_category": settings.freelancer_job_category,
+                "max_jobs": settings.freelancer_max_jobs
+            }
+        }
+        
+        # Prepare headers with authentication
+        headers = {"Content-Type": "application/json"}
+        
+        # Add API key if configured
+        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+            print(f"Using API key authentication: {api_key[:10]}...")
+        else:
+            print("WARNING: N8N_WEBHOOK_API_KEY not set - webhook may fail authentication")
+        
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            response = await client.post(
+                webhook_url,
+                json=payload,
+                headers=headers
+            )
+            print(f"Freelancer Plus webhook response status: {response.status_code}")
+            print(f"Freelancer Plus webhook response: {response.text[:500] if response.text else 'empty'}")
+            
+            # Check if response contains N8N workflow error
+            if response.status_code != 200:
+                error_detail = response.text
+                try:
+                    error_json = response.json()
+                    if "Unused Respond to Webhook" in str(error_json):
+                        error_detail = "N8N Workflow Error: Please remove or properly connect the 'Respond to Webhook' node in your Freelancer Plus workflow"
+                    elif "not registered" in str(error_json):
+                        error_detail = f"N8N Webhook Not Found: The webhook at '{webhook_url}' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
+                    elif error_json.get("message"):
+                        error_detail = f"N8N Error: {error_json.get('message')}"
+                except:
+                    pass
+                raise HTTPException(status_code=response.status_code, detail=error_detail)
+            
+            # Increment fetch count after successful fetch
+            user.freelancer_plus_fetch_count += 1
+            db.commit()
+            
+            remaining = daily_limit - user.freelancer_plus_fetch_count
+            print(f"User {user.email} fetched Freelancer Plus. Count: {user.freelancer_plus_fetch_count}/{daily_limit}, Remaining: {remaining}")
+            
+            return {
+                "success": True, 
+                "message": "Freelancer Plus jobs fetch triggered successfully", 
+                "status": response.status_code,
+                "fetch_count": user.freelancer_plus_fetch_count,
+                "daily_limit": daily_limit,
+                "remaining": remaining
+            }
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Freelancer Plus webhook timeout - workflow may still be processing")
+    except Exception as e:
+        print(f"Error triggering Freelancer Plus webhook: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to trigger Freelancer Plus webhook: {str(e)}")
+
+@app.get("/api/fetch-limits")
+async def get_fetch_limits(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    """Get remaining fetches for all platforms"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        user = get_user_by_email(email, db)
+        
+        # Check and reset for each platform
+        upwork_count, upwork_limit, upwork_can_fetch, upwork_remaining = check_and_reset_daily_limit(user, "upwork", db)
+        freelancer_count, freelancer_limit, freelancer_can_fetch, freelancer_remaining = check_and_reset_daily_limit(user, "freelancer", db)
+        freelancer_plus_count, freelancer_plus_limit, freelancer_plus_can_fetch, freelancer_plus_remaining = check_and_reset_daily_limit(user, "freelancer_plus", db)
+        
+        return {
+            "upwork": {
+                "fetch_count": upwork_count,
+                "daily_limit": upwork_limit,
+                "remaining": upwork_remaining,
+                "can_fetch": upwork_can_fetch
+            },
+            "freelancer": {
+                "fetch_count": freelancer_count,
+                "daily_limit": freelancer_limit,
+                "remaining": freelancer_remaining,
+                "can_fetch": freelancer_can_fetch
+            },
+            "freelancer_plus": {
+                "fetch_count": freelancer_plus_count,
+                "daily_limit": freelancer_plus_limit,
+                "remaining": freelancer_plus_remaining,
+                "can_fetch": freelancer_plus_can_fetch
+            }
+        }
+    except Exception as e:
+        print(f"Error checking limits: {e}")
+        return {
+            "upwork": {"fetch_count": 0, "daily_limit": 5, "remaining": 5, "can_fetch": True},
+            "freelancer": {"fetch_count": 0, "daily_limit": 5, "remaining": 5, "can_fetch": True},
+            "freelancer_plus": {"fetch_count": 0, "daily_limit": 5, "remaining": 5, "can_fetch": True}
+        }
+
 @app.get("/api/leads")
-async def get_leads(db: Session = Depends(get_db)):
+async def get_leads(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     try:
         if db is None:
             return {"leads": []}
         
         from models import Lead
-        # Order by updated_at to show most recently updated leads first
-        leads = db.query(Lead).order_by(Lead.updated_at.desc()).all()
+        user = get_user_by_email(email, db)
+        
+        # Debug: Print user info
+        print(f"🔍 DEBUG - Current user: id={user.id}, email={user.email}")
+        
+        # Debug: Check all leads in database
+        all_leads = db.query(Lead).all()
+        print(f"🔍 DEBUG - Total leads in DB: {len(all_leads)}")
+        for lead in all_leads[:5]:  # Print first 5
+            print(f"   Lead id={lead.id}, user_id={lead.user_id}, title={lead.title[:50]}")
+        
+        # Get only this user's leads
+        leads = db.query(Lead).filter(Lead.user_id == user.id).order_by(Lead.updated_at.desc()).all()
+        print(f"🔍 DEBUG - Leads for user {user.id}: {len(leads)}")
+        
         return {
             "leads": [
                 {
@@ -301,6 +719,7 @@ async def get_leads(db: Session = Depends(get_db)):
                     "description": lead.description,
                     "Proposal": lead.proposal,
                     "url": lead.url,
+                    "avg_bid_price": lead.avg_bid_price if hasattr(lead, 'avg_bid_price') else None,
                     "created_at": lead.created_at.isoformat() if lead.created_at else None,
                     "updated_at": lead.updated_at.isoformat() if lead.updated_at else None
                 }
@@ -308,11 +727,13 @@ async def get_leads(db: Session = Depends(get_db)):
             ]
         }
     except Exception as e:
-        print(f"Error fetching leads: {e}")
+        print(f"❌ Error fetching leads: {e}")
+        import traceback
+        traceback.print_exc()
         return {"leads": []}
 
 @app.get("/api/dashboard/pipeline")
-async def get_pipeline_stats(db: Session = Depends(get_db)):
+async def get_pipeline_stats(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     """
     Get pipeline breakdown with lead counts and values per stage
     """
@@ -321,6 +742,7 @@ async def get_pipeline_stats(db: Session = Depends(get_db)):
             return {"pipeline": []}
         
         from models import Lead
+        user = get_user_by_email(email, db)
         
         # Define pipeline stages in order
         stages = ["New", "Proposal Sent", "Approved", "Closed"]
@@ -336,8 +758,8 @@ async def get_pipeline_stats(db: Session = Depends(get_db)):
             "Lost": "Closed"
         }
         
-        # Get all leads
-        all_leads = db.query(Lead).all()
+        # Get only this user's leads
+        all_leads = db.query(Lead).filter(Lead.user_id == user.id).all()
         
         # Initialize pipeline data
         pipeline_data = {stage: {"count": 0, "value": 0} for stage in stages}
@@ -387,7 +809,7 @@ async def get_pipeline_stats(db: Session = Depends(get_db)):
         return {"pipeline": []}
 
 @app.get("/api/dashboard/stats")
-async def get_dashboard_stats(db: Session = Depends(get_db)):
+async def get_dashboard_stats(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     try:
         if db is None:
             return {
@@ -401,9 +823,10 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         
         from models import Lead
         from datetime import datetime, timedelta
+        user = get_user_by_email(email, db)
         
-        # Get all leads
-        all_leads = db.query(Lead).all()
+        # Get only this user's leads
+        all_leads = db.query(Lead).filter(Lead.user_id == user.id).all()
         total_leads = len(all_leads)
         
         # Count by status
@@ -496,11 +919,12 @@ async def update_lead_proposal(
             raise HTTPException(status_code=500, detail="Database connection failed")
         
         from models import Lead
+        user = get_user_by_email(email, db)
         
-        # Find the lead
-        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        # Find the lead and verify ownership
+        lead = db.query(Lead).filter(Lead.id == lead_id, Lead.user_id == user.id).first()
         if not lead:
-            raise HTTPException(status_code=404, detail="Lead not found")
+            raise HTTPException(status_code=404, detail="Lead not found or access denied")
         
         # Debug: Print received data
         print(f"Received proposal_data: {proposal_data}")
@@ -558,11 +982,12 @@ async def approve_lead(
             raise HTTPException(status_code=500, detail="Database connection failed")
         
         from models import Lead
+        user = get_user_by_email(email, db)
         
-        # Find the lead
-        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        # Find the lead and verify ownership
+        lead = db.query(Lead).filter(Lead.id == lead_id, Lead.user_id == user.id).first()
         if not lead:
-            raise HTTPException(status_code=404, detail="Lead not found")
+            raise HTTPException(status_code=404, detail="Lead not found or access denied")
         
         # Update the status to Approved
         lead.status = "Approved"
@@ -605,13 +1030,25 @@ async def clean_leads(email: str = Depends(verify_token), db: Session = Depends(
             raise HTTPException(status_code=500, detail="Database connection failed")
         
         from models import Lead
+        user = get_user_by_email(email, db)
         
-        # Delete all leads
-        deleted_count = db.query(Lead).delete()
+        # Log before deletion
+        total_leads_before = db.query(Lead).count()
+        user_leads_before = db.query(Lead).filter(Lead.user_id == user.id).count()
+        print(f"[CLEAN LEADS] User: {user.email} (ID: {user.id})")
+        print(f"[CLEAN LEADS] Total leads in DB: {total_leads_before}")
+        print(f"[CLEAN LEADS] User's leads: {user_leads_before}")
+        
+        # Delete only this user's leads
+        deleted_count = db.query(Lead).filter(Lead.user_id == user.id).delete()
         db.commit()
         
-        print(f"Deleted {deleted_count} leads")
-        return {"success": True, "message": f"Deleted {deleted_count} leads", "count": deleted_count}
+        # Log after deletion
+        total_leads_after = db.query(Lead).count()
+        print(f"[CLEAN LEADS] Deleted: {deleted_count} leads")
+        print(f"[CLEAN LEADS] Total leads remaining: {total_leads_after}")
+        
+        return {"success": True, "message": f"Deleted {deleted_count} leads for {user.email}", "count": deleted_count}
     except Exception as e:
         print(f"Error cleaning leads: {e}")
         if db:
@@ -700,19 +1137,19 @@ async def health_check():
         "database": db_status
     }
 
-@app.get("/api/n8n/settings")
-async def get_settings_for_n8n(db: Session = Depends(get_db)):
+@app.get("/api/n8n/settings/{user_id}")
+async def get_settings_for_n8n(user_id: int, db: Session = Depends(get_db)):
     """
-    Endpoint for n8n to fetch global settings
-    Usage: GET /api/n8n/settings
+    Endpoint for n8n to fetch user-specific settings
+    Usage: GET /api/n8n/settings/{user_id}
     """
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
-    from models import GlobalSettings
+    from models import UserSettings
     
-    # Get global settings (there should only be one record)
-    settings = db.query(GlobalSettings).first()
+    # Get user settings
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
     if not settings:
         # Return default settings if none exist
         return {
@@ -750,12 +1187,14 @@ async def get_settings(email: str = Depends(verify_token), db: Session = Depends
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
-    from models import GlobalSettings
+    from models import UserSettings
+    user = get_user_by_email(email, db)
     
-    # Get or create global settings (there should only be one record)
-    settings = db.query(GlobalSettings).first()
+    # Get or create user settings
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
     if not settings:
-        settings = GlobalSettings(
+        settings = UserSettings(
+            user_id=user.id,
             upwork_job_categories=["Web Development"],
             upwork_max_jobs=3,
             upwork_payment_verified=False,
@@ -781,12 +1220,13 @@ async def update_settings(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
-    from models import GlobalSettings
+    from models import UserSettings
+    user = get_user_by_email(email, db)
     
-    # Get or create global settings (there should only be one record)
-    settings = db.query(GlobalSettings).first()
+    # Get or create user settings
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
     if not settings:
-        settings = GlobalSettings()
+        settings = UserSettings(user_id=user.id)
         db.add(settings)
     
     # Update settings
@@ -808,6 +1248,16 @@ async def update_settings(
         settings.freelancer_auto_fetch = settings_data.freelancer_auto_fetch
     if settings_data.freelancer_auto_fetch_interval is not None:
         settings.freelancer_auto_fetch_interval = settings_data.freelancer_auto_fetch_interval
+    if settings_data.ai_agent_min_score is not None:
+        settings.ai_agent_min_score = settings_data.ai_agent_min_score
+    if settings_data.ai_agent_max_score is not None:
+        settings.ai_agent_max_score = settings_data.ai_agent_max_score
+    if settings_data.ai_agent_model is not None:
+        settings.ai_agent_model = settings_data.ai_agent_model
+    if settings_data.ai_agent_max_bids_freelancer is not None:
+        settings.ai_agent_max_bids_freelancer = settings_data.ai_agent_max_bids_freelancer
+    if settings_data.ai_agent_max_connects_upwork is not None:
+        settings.ai_agent_max_connects_upwork = settings_data.ai_agent_max_connects_upwork
     
     settings.updated_at = datetime.utcnow()
     db.commit()
@@ -816,12 +1266,51 @@ async def update_settings(
     return settings
 
 
+# User Profile endpoints
+@app.get("/api/profile", response_model=UserResponse)
+async def get_profile(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    """Get current user profile"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    user = get_user_by_email(email, db)
+    return user
+
+@app.put("/api/profile", response_model=UserResponse)
+async def update_profile(
+    profile_data: UserProfileUpdate,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Update current user profile"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    from models import User
+    user = get_user_by_email(email, db)
+    
+    # Update profile fields
+    if profile_data.name is not None:
+        user.name = profile_data.name
+    if profile_data.telegram_chat_id is not None:
+        user.telegram_chat_id = profile_data.telegram_chat_id
+    if profile_data.country is not None:
+        user.country = profile_data.country
+    
+    user.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+    
+    return user
+
+
 # Notification endpoints
 @app.post("/api/notifications/webhook")
 async def receive_notification_webhook(payload: dict, db: Session = Depends(get_db)):
     """
     Receive notifications from n8n webhook
     Expected payload: {
+        "user_id": 1,
         "type": "success|info|warning|error",
         "title": "Notification Title",
         "message": "Notification message"
@@ -833,7 +1322,12 @@ async def receive_notification_webhook(payload: dict, db: Session = Depends(get_
     try:
         from models import Notification
         
+        user_id = payload.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+        
         notification = Notification(
+            user_id=user_id,
             type=payload.get("type", "info"),
             title=payload.get("title", "Notification"),
             message=payload.get("message", ""),
@@ -859,14 +1353,16 @@ async def get_notifications(
     email: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Get all notifications, ordered by newest first"""
+    """Get user's notifications, ordered by newest first"""
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     try:
         from models import Notification
+        user = get_user_by_email(email, db)
         
         notifications = db.query(Notification)\
+            .filter(Notification.user_id == user.id)\
             .order_by(Notification.created_at.desc())\
             .limit(limit)\
             .all()
@@ -899,10 +1395,14 @@ async def mark_notification_read(
     
     try:
         from models import Notification
+        user = get_user_by_email(email, db)
         
-        notification = db.query(Notification).filter(Notification.id == notification_id).first()
+        notification = db.query(Notification).filter(
+            Notification.id == notification_id,
+            Notification.user_id == user.id
+        ).first()
         if not notification:
-            raise HTTPException(status_code=404, detail="Notification not found")
+            raise HTTPException(status_code=404, detail="Notification not found or access denied")
         
         notification.read = True
         notification.updated_at = datetime.utcnow()
@@ -920,14 +1420,15 @@ async def mark_all_notifications_read(
     email: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Mark all notifications as read"""
+    """Mark all user's notifications as read"""
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     try:
         from models import Notification
+        user = get_user_by_email(email, db)
         
-        db.query(Notification).update({"read": True, "updated_at": datetime.utcnow()})
+        db.query(Notification).filter(Notification.user_id == user.id).update({"read": True, "updated_at": datetime.utcnow()})
         db.commit()
         
         return {"success": True, "message": "All notifications marked as read"}
@@ -947,10 +1448,14 @@ async def delete_notification(
     
     try:
         from models import Notification
+        user = get_user_by_email(email, db)
         
-        notification = db.query(Notification).filter(Notification.id == notification_id).first()
+        notification = db.query(Notification).filter(
+            Notification.id == notification_id,
+            Notification.user_id == user.id
+        ).first()
         if not notification:
-            raise HTTPException(status_code=404, detail="Notification not found")
+            raise HTTPException(status_code=404, detail="Notification not found or access denied")
         
         db.delete(notification)
         db.commit()
@@ -961,3 +1466,345 @@ async def delete_notification(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to delete notification: {str(e)}")
+
+
+# Admin endpoints
+def verify_admin(email: str = Depends(verify_token), db: Session = Depends(get_db)):
+    """Verify that the current user is an admin"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    user = get_user_by_email(email, db)
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+@app.get("/api/admin/stats")
+async def get_admin_stats(user = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Get system-wide statistics for admin dashboard"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import User, Lead
+        from datetime import datetime, timedelta
+        
+        # Total users
+        total_users = db.query(User).count()
+        
+        # Total leads
+        total_leads = db.query(Lead).count()
+        
+        # Today's fetches (count users who fetched today)
+        today = datetime.utcnow().date()
+        today_fetches = 0
+        all_users = db.query(User).all()
+        for u in all_users:
+            if u.upwork_last_reset and u.upwork_last_reset.date() == today:
+                today_fetches += u.upwork_fetch_count or 0
+            if u.freelancer_last_reset and u.freelancer_last_reset.date() == today:
+                today_fetches += u.freelancer_fetch_count or 0
+            if u.freelancer_plus_last_reset and u.freelancer_plus_last_reset.date() == today:
+                today_fetches += u.freelancer_plus_fetch_count or 0
+        
+        # Platform breakdown
+        platform_counts = {}
+        all_leads = db.query(Lead).all()
+        for lead in all_leads:
+            platform = lead.platform or "Unknown"
+            platform_counts[platform] = platform_counts.get(platform, 0) + 1
+        
+        total_with_platform = sum(platform_counts.values())
+        platform_breakdown = [
+            {
+                "name": platform,
+                "count": count,
+                "percentage": round((count / total_with_platform * 100), 1) if total_with_platform > 0 else 0
+            }
+            for platform, count in platform_counts.items()
+        ]
+        
+        return {
+            "totalUsers": total_users,
+            "totalLeads": total_leads,
+            "todayFetches": today_fetches,
+            "platformBreakdown": platform_breakdown
+        }
+    except Exception as e:
+        print(f"Error fetching admin stats: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/users")
+async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Get all users with their stats"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import User, Lead
+        
+        all_users = db.query(User).all()
+        users_data = []
+        
+        for u in all_users:
+            # Count leads for this user
+            leads_count = db.query(Lead).filter(Lead.user_id == u.id).count()
+            
+            users_data.append({
+                "id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "role": u.role,
+                "upwork_fetch_count": u.upwork_fetch_count or 0,
+                "freelancer_fetch_count": u.freelancer_fetch_count or 0,
+                "freelancer_plus_fetch_count": u.freelancer_plus_fetch_count or 0,
+                "leads_count": leads_count,
+                "created_at": u.created_at.isoformat() if u.created_at else None
+            })
+        
+        return {"users": users_data}
+    except Exception as e:
+        print(f"Error fetching users: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/admin/users/{user_id}")
+async def update_user(
+    user_id: int,
+    update_data: dict,
+    admin_user = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    """Update user role and limits"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import User
+        
+        target_user = db.query(User).filter(User.id == user_id).first()
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Update role if provided
+        if "role" in update_data:
+            target_user.role = update_data["role"]
+        
+        # Note: Daily limits are currently hardcoded in check_and_reset_daily_limit
+        # For now, we'll store them in user settings or add columns to User model
+        # This is a placeholder for future implementation
+        
+        target_user.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(target_user)
+        
+        return {
+            "success": True,
+            "message": "User updated successfully",
+            "user": {
+                "id": target_user.id,
+                "email": target_user.email,
+                "role": target_user.role
+            }
+        }
+    except Exception as e:
+        print(f"Error updating user: {e}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    admin_user = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete a user and all their data"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import User
+        
+        # Prevent admin from deleting themselves
+        if admin_user.id == user_id:
+            raise HTTPException(status_code=400, detail="Cannot delete your own account")
+        
+        target_user = db.query(User).filter(User.id == user_id).first()
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Delete user (cascade will delete leads, settings, notifications)
+        db.delete(target_user)
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"User {target_user.email} deleted successfully"
+        }
+    except Exception as e:
+        print(f"Error deleting user: {e}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/users/{user_id}/reset-fetch-count")
+async def reset_user_fetch_count(
+    user_id: int,
+    admin_user = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    """Reset fetch counts for a user"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import User
+        
+        target_user = db.query(User).filter(User.id == user_id).first()
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Reset all fetch counts
+        target_user.upwork_fetch_count = 0
+        target_user.freelancer_fetch_count = 0
+        target_user.freelancer_plus_fetch_count = 0
+        target_user.upwork_last_reset = datetime.utcnow()
+        target_user.freelancer_last_reset = datetime.utcnow()
+        target_user.freelancer_plus_last_reset = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Fetch counts reset for {target_user.email}"
+        }
+    except Exception as e:
+        print(f"Error resetting fetch count: {e}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/settings")
+async def get_admin_settings(user = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Get system-wide settings"""
+    try:
+        # For now, return environment-based settings
+        # In production, these could be stored in a database table
+        return {
+            "default_upwork_limit": 5,
+            "default_freelancer_limit": 5,
+            "default_freelancer_plus_limit": 3,
+            "upwork_webhook_url": os.getenv("UPWORK_WEBHOOK_URL", ""),
+            "freelancer_webhook_url": os.getenv("FREELANCER_WEBHOOK_URL", ""),
+            "freelancer_plus_webhook_url": os.getenv("FREELANCER_PLUS_WEBHOOK_URL", "")
+        }
+    except Exception as e:
+        print(f"Error fetching admin settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/admin/settings")
+async def update_admin_settings(
+    settings_data: dict,
+    user = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    """Update system-wide settings"""
+    try:
+        # For now, these settings are read from environment variables
+        # In production, you would store these in a database table
+        # and update them here
+        
+        return {
+            "success": True,
+            "message": "Settings updated successfully (Note: Webhook URLs are read from environment variables)"
+        }
+    except Exception as e:
+        print(f"Error updating admin settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/analytics")
+async def get_admin_analytics(
+    range: str = "7d",
+    user = Depends(verify_admin),
+    db: Session = Depends(get_db)
+):
+    """Get analytics data for admin dashboard"""
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        from models import User, Lead
+        from datetime import datetime, timedelta
+        
+        # Parse time range
+        days = 7
+        if range == "30d":
+            days = 30
+        elif range == "90d":
+            days = 90
+        
+        start_date = datetime.utcnow() - timedelta(days=days)
+        
+        # Fetch trends (mock data for now - would need to track fetch history)
+        fetch_trends = []
+        for i in range(days):
+            date = start_date + timedelta(days=i)
+            fetch_trends.append({
+                "date": date.strftime("%b %d"),
+                "upwork": 0,  # Would need fetch history table
+                "freelancer": 0,
+                "freelancer_plus": 0
+            })
+        
+        # User activity
+        user_activity = []
+        for i in range(days):
+            date = start_date + timedelta(days=i)
+            date_end = date + timedelta(days=1)
+            
+            # Count users created on this day
+            new_users = db.query(User).filter(
+                User.created_at >= date,
+                User.created_at < date_end
+            ).count()
+            
+            user_activity.append({
+                "date": date.strftime("%b %d"),
+                "active_users": 0,  # Would need activity tracking
+                "new_users": new_users
+            })
+        
+        # Platform performance
+        platform_stats = {}
+        all_leads = db.query(Lead).filter(Lead.created_at >= start_date).all()
+        
+        for lead in all_leads:
+            platform = lead.platform or "Unknown"
+            if platform not in platform_stats:
+                platform_stats[platform] = {"total": 0}
+            platform_stats[platform]["total"] += 1
+        
+        platform_performance = [
+            {
+                "name": platform,
+                "total_leads": stats["total"],
+                "avg_per_fetch": round(stats["total"] / days, 1),
+                "success_rate": 95  # Mock data
+            }
+            for platform, stats in platform_stats.items()
+        ]
+        
+        return {
+            "fetchTrends": fetch_trends,
+            "userActivity": user_activity,
+            "platformPerformance": platform_performance
+        }
+    except Exception as e:
+        print(f"Error fetching analytics: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
