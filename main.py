@@ -223,7 +223,7 @@ async def receive_leads_from_n8n(payload: dict, db: Session = Depends(get_db)):
         print(f"Error saving leads from N8N: {str(e)}")
         if db:
             db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.post("/api/sync-send")
 async def sync_send(payload: dict, db: Session = Depends(get_db)):
@@ -247,7 +247,8 @@ async def sync_send(payload: dict, db: Session = Depends(get_db)):
             )
             return response.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error in sync_send: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.get("/api/sync-receive")
 async def sync_receive(email: str = Depends(verify_token), db: Session = Depends(get_db)):
@@ -350,12 +351,12 @@ async def sync_receive(email: str = Depends(verify_token), db: Session = Depends
             return leads_data
     except httpx.TimeoutException as e:
         print(f"Timeout error: {str(e)}")
-        raise HTTPException(status_code=504, detail="N8N webhook timeout")
+        raise HTTPException(status_code=504, detail="Load On server Plz try again Later")
     except Exception as e:
         print(f"Error in sync_receive: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.post("/api/fetch-upwork")
 async def fetch_upwork(email: str = Depends(verify_token), db: Session = Depends(get_db)):
@@ -378,7 +379,7 @@ async def fetch_upwork(email: str = Depends(verify_token), db: Session = Depends
         # Get user's settings
         settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
         if not settings:
-            raise HTTPException(status_code=400, detail="User settings not found. Please configure settings first.")
+            raise HTTPException(status_code=400, detail="Load On server Plz try again Later")
         
         webhook_url = os.getenv("UPWORK_WEBHOOK_URL")
         print(f"Triggering Upwork webhook for user {user.email}: {webhook_url}")
@@ -419,15 +420,16 @@ async def fetch_upwork(email: str = Depends(verify_token), db: Session = Depends
             
             # Check if response contains N8N workflow error
             if response.status_code != 200:
-                error_detail = response.text
+                error_detail = "Unable to fetch jobs. Please try again later."
                 try:
                     error_json = response.json()
                     if "Unused Respond to Webhook" in str(error_json):
-                        error_detail = "N8N Workflow Error: Please remove or properly connect the 'Respond to Webhook' node in your Upwork workflow"
-                    elif "not registered" in str(error_json):
-                        error_detail = f"N8N Webhook Not Found: The webhook at '{webhook_url}' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
+                        error_detail = "Workflow configuration error. Please contact support."
+                    elif "not registered" in str(error_json).lower():
+                        error_detail = "N8N Webhook Not Found: The webhook at 'https://n8n.srv1128153.hstgr.cloud/webhook/upwork001' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
                     elif error_json.get("message"):
-                        error_detail = f"N8N Error: {error_json.get('message')}"
+                        # Don't expose internal error messages to users
+                        error_detail = "Service temporarily unavailable. Please try again."
                 except:
                     pass
                 raise HTTPException(status_code=response.status_code, detail=error_detail)
@@ -450,12 +452,12 @@ async def fetch_upwork(email: str = Depends(verify_token), db: Session = Depends
     except HTTPException:
         raise
     except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Upwork webhook timeout - workflow may still be processing")
+        raise HTTPException(status_code=504, detail="Load On server Plz try again Later")
     except Exception as e:
         print(f"Error triggering Upwork webhook: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to trigger Upwork webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.post("/api/fetch-freelancer")
 async def fetch_freelancer(email: str = Depends(verify_token), db: Session = Depends(get_db)):
@@ -478,7 +480,7 @@ async def fetch_freelancer(email: str = Depends(verify_token), db: Session = Dep
         # Get user's settings
         settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
         if not settings:
-            raise HTTPException(status_code=400, detail="User settings not found. Please configure settings first.")
+            raise HTTPException(status_code=400, detail="Load On server Plz try again Later")
         
         webhook_url = os.getenv("FREELANCER_WEBHOOK_URL")
         print(f"Triggering Freelancer webhook for user {user.email}: {webhook_url}")
@@ -518,15 +520,16 @@ async def fetch_freelancer(email: str = Depends(verify_token), db: Session = Dep
             
             # Check if response contains N8N workflow error
             if response.status_code != 200:
-                error_detail = response.text
+                error_detail = "Unable to fetch jobs. Please try again later."
                 try:
                     error_json = response.json()
                     if "Unused Respond to Webhook" in str(error_json):
-                        error_detail = "N8N Workflow Error: Please remove or properly connect the 'Respond to Webhook' node in your Freelancer workflow"
-                    elif "not registered" in str(error_json):
-                        error_detail = f"N8N Webhook Not Found: The webhook at '{webhook_url}' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
+                        error_detail = "Workflow configuration error. Please contact support."
+                    elif "not registered" in str(error_json).lower():
+                        error_detail = "N8N Webhook Not Found: The webhook at 'https://n8n.srv1128153.hstgr.cloud/webhook/upwork001' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
                     elif error_json.get("message"):
-                        error_detail = f"N8N Error: {error_json.get('message')}"
+                        # Don't expose internal error messages to users
+                        error_detail = "Service temporarily unavailable. Please try again."
                 except:
                     pass
                 raise HTTPException(status_code=response.status_code, detail=error_detail)
@@ -549,12 +552,12 @@ async def fetch_freelancer(email: str = Depends(verify_token), db: Session = Dep
     except HTTPException:
         raise
     except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Freelancer webhook timeout - workflow may still be processing")
+        raise HTTPException(status_code=504, detail="Load On server Plz try again Later")
     except Exception as e:
         print(f"Error triggering Freelancer webhook: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to trigger Freelancer webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.post("/api/fetch-freelancer-plus")
 async def fetch_freelancer_plus(email: str = Depends(verify_token), db: Session = Depends(get_db)):
@@ -577,7 +580,7 @@ async def fetch_freelancer_plus(email: str = Depends(verify_token), db: Session 
         # Get user's settings
         settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
         if not settings:
-            raise HTTPException(status_code=400, detail="User settings not found. Please configure settings first.")
+            raise HTTPException(status_code=400, detail="Load On server Plz try again Later")
         
         webhook_url = os.getenv("FREELANCER_PLUS_WEBHOOK_URL")
         print(f"Triggering Freelancer Plus webhook for user {user.email}: {webhook_url}")
@@ -617,15 +620,16 @@ async def fetch_freelancer_plus(email: str = Depends(verify_token), db: Session 
             
             # Check if response contains N8N workflow error
             if response.status_code != 200:
-                error_detail = response.text
+                error_detail = "Unable to fetch jobs. Please try again later."
                 try:
                     error_json = response.json()
                     if "Unused Respond to Webhook" in str(error_json):
-                        error_detail = "N8N Workflow Error: Please remove or properly connect the 'Respond to Webhook' node in your Freelancer Plus workflow"
-                    elif "not registered" in str(error_json):
-                        error_detail = f"N8N Webhook Not Found: The webhook at '{webhook_url}' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
+                        error_detail = "Workflow configuration error. Please contact support."
+                    elif "not registered" in str(error_json).lower():
+                        error_detail = "N8N Webhook Not Found: The webhook at 'https://n8n.srv1128153.hstgr.cloud/webhook/upwork001' is not registered or the workflow is not active. Please check: 1) Workflow is activated (toggle ON), 2) Webhook path matches, 3) Workflow is saved"
                     elif error_json.get("message"):
-                        error_detail = f"N8N Error: {error_json.get('message')}"
+                        # Don't expose internal error messages to users
+                        error_detail = "Service temporarily unavailable. Please try again."
                 except:
                     pass
                 raise HTTPException(status_code=response.status_code, detail=error_detail)
@@ -648,12 +652,12 @@ async def fetch_freelancer_plus(email: str = Depends(verify_token), db: Session 
     except HTTPException:
         raise
     except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Freelancer Plus webhook timeout - workflow may still be processing")
+        raise HTTPException(status_code=504, detail="Load On server Plz try again Later")
     except Exception as e:
         print(f"Error triggering Freelancer Plus webhook: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to trigger Freelancer Plus webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.get("/api/fetch-limits")
 async def get_fetch_limits(email: str = Depends(verify_token), db: Session = Depends(get_db)):
@@ -986,7 +990,7 @@ async def update_lead_proposal(
         print(f"Error updating proposal: {e}")
         if db:
             db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.put("/api/leads/{lead_id}/approve")
 async def approve_lead(
@@ -1038,7 +1042,7 @@ async def approve_lead(
         print(f"Error approving lead: {e}")
         if db:
             db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.delete("/api/leads/clean")
 async def clean_leads(email: str = Depends(verify_token), db: Session = Depends(get_db)):
@@ -1070,7 +1074,7 @@ async def clean_leads(email: str = Depends(verify_token), db: Session = Depends(
         print(f"Error cleaning leads: {e}")
         if db:
             db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.post("/api/auth/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def signup(user_data: UserSignup, db: Session = Depends(get_db)):
@@ -1361,8 +1365,9 @@ async def receive_notification_webhook(payload: dict, db: Session = Depends(get_
             "notification_id": notification.id
         }
     except Exception as e:
+        print(f"Error saving notification: {str(e)}")
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to save notification: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.get("/api/notifications")
 async def get_notifications(
@@ -1398,7 +1403,8 @@ async def get_notifications(
             ]
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch notifications: {str(e)}")
+        print(f"Error fetching notifications: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.put("/api/notifications/{notification_id}/read")
 async def mark_notification_read(
@@ -1429,8 +1435,9 @@ async def mark_notification_read(
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Error updating notification: {str(e)}")
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to update notification: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.put("/api/notifications/mark-all-read")
 async def mark_all_notifications_read(
@@ -1450,8 +1457,9 @@ async def mark_all_notifications_read(
         
         return {"success": True, "message": "All notifications marked as read"}
     except Exception as e:
+        print(f"Error updating notifications: {str(e)}")
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to update notifications: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.delete("/api/notifications/{notification_id}")
 async def delete_notification(
@@ -1481,8 +1489,9 @@ async def delete_notification(
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Error deleting notification: {str(e)}")
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete notification: {str(e)}")
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 
 # Admin endpoints
@@ -1577,7 +1586,7 @@ async def get_admin_stats(user = Depends(verify_admin), db: Session = Depends(ge
         print(f"Error fetching admin stats: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.get("/api/admin/users")
 async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_db)):
@@ -1619,7 +1628,7 @@ async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_
         print(f"Error fetching users: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.put("/api/admin/users/{user_id}")
 async def update_user(
@@ -1664,7 +1673,7 @@ async def update_user(
         print(f"Error updating user: {e}")
         if db:
             db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.delete("/api/admin/users/{user_id}")
 async def delete_user(
@@ -1699,7 +1708,7 @@ async def delete_user(
         print(f"Error deleting user: {e}")
         if db:
             db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.post("/api/admin/users/{user_id}/reset-fetch-count")
 async def reset_user_fetch_count(
@@ -1736,7 +1745,7 @@ async def reset_user_fetch_count(
         print(f"Error resetting fetch count: {e}")
         if db:
             db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.get("/api/admin/settings")
 async def get_admin_settings(user = Depends(verify_admin), db: Session = Depends(get_db)):
@@ -1757,7 +1766,7 @@ async def get_admin_settings(user = Depends(verify_admin), db: Session = Depends
         }
     except Exception as e:
         print(f"Error fetching admin settings: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @app.put("/api/admin/settings")
 async def update_admin_settings(
