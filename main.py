@@ -7,7 +7,7 @@ from datetime import datetime
 import httpx
 import os
 from dotenv import load_dotenv
-from schemas import UserSignup, UserLogin, Token, UserResponse, SettingsUpdate, SettingsResponse, UserProfileUpdate
+from schemas import UserSignup, UserLogin, Token, UserResponse, SettingsUpdate, SettingsResponse, UserProfileUpdate, TalentCreate, TalentUpdate, TalentResponse
 from auth import get_password_hash, verify_password, create_access_token, verify_token
 
 load_dotenv()
@@ -1946,3 +1946,244 @@ async def get_admin_leads(user = Depends(verify_admin), db: Session = Depends(ge
         import traceback
         traceback.print_exc()
         return {"leads": []}
+
+
+# Talent endpoints
+@app.post("/api/talents", status_code=status.HTTP_201_CREATED)
+async def create_talent(
+    talent_data: dict,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Create a new talent entry"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Talent
+        from schemas import TalentCreate
+        
+        user = get_user_by_email(email, db)
+        
+        # Validate input
+        talent_create = TalentCreate(**talent_data)
+        
+        # Create new talent
+        new_talent = Talent(
+            user_id=user.id,
+            name=talent_create.name,
+            description=talent_create.description,
+            rate=talent_create.rate,
+            rating=talent_create.rating,
+            reviews=talent_create.reviews,
+            skills=talent_create.skills or [],
+            location=talent_create.location,
+            profile_url=talent_create.profile_url,
+            image_url=talent_create.image_url
+        )
+        
+        db.add(new_talent)
+        db.commit()
+        db.refresh(new_talent)
+        
+        return {
+            "id": new_talent.id,
+            "user_id": new_talent.user_id,
+            "name": new_talent.name,
+            "description": new_talent.description,
+            "rate": new_talent.rate,
+            "rating": new_talent.rating,
+            "reviews": new_talent.reviews,
+            "skills": new_talent.skills,
+            "location": new_talent.location,
+            "profile_url": new_talent.profile_url,
+            "image_url": new_talent.image_url,
+            "created_at": new_talent.created_at.isoformat() if new_talent.created_at else None,
+            "updated_at": new_talent.updated_at.isoformat() if new_talent.updated_at else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creating talent: {str(e)}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create talent")
+
+@app.get("/api/talents")
+async def get_talents(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get all talents for the current user"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Talent
+        user = get_user_by_email(email, db)
+        
+        talents = db.query(Talent).filter(Talent.user_id == user.id).order_by(Talent.created_at.desc()).all()
+        
+        return {
+            "talents": [
+                {
+                    "id": t.id,
+                    "user_id": t.user_id,
+                    "name": t.name,
+                    "description": t.description,
+                    "rate": t.rate,
+                    "rating": t.rating,
+                    "reviews": t.reviews,
+                    "skills": t.skills,
+                    "location": t.location,
+                    "profile_url": t.profile_url,
+                    "image_url": t.image_url,
+                    "created_at": t.created_at.isoformat() if t.created_at else None,
+                    "updated_at": t.updated_at.isoformat() if t.updated_at else None
+                }
+                for t in talents
+            ]
+        }
+    except Exception as e:
+        print(f"Error fetching talents: {str(e)}")
+        return {"talents": []}
+
+@app.get("/api/talents/{talent_id}")
+async def get_talent(
+    talent_id: int,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get a specific talent by ID"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Talent
+        user = get_user_by_email(email, db)
+        
+        talent = db.query(Talent).filter(Talent.id == talent_id, Talent.user_id == user.id).first()
+        if not talent:
+            raise HTTPException(status_code=404, detail="Talent not found or access denied")
+        
+        return {
+            "id": talent.id,
+            "user_id": talent.user_id,
+            "name": talent.name,
+            "description": talent.description,
+            "rate": talent.rate,
+            "rating": talent.rating,
+            "reviews": talent.reviews,
+            "skills": talent.skills,
+            "location": talent.location,
+            "profile_url": talent.profile_url,
+            "image_url": talent.image_url,
+            "created_at": talent.created_at.isoformat() if talent.created_at else None,
+            "updated_at": talent.updated_at.isoformat() if talent.updated_at else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching talent: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch talent")
+
+@app.put("/api/talents/{talent_id}")
+async def update_talent(
+    talent_id: int,
+    talent_data: dict,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Update a talent entry"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Talent
+        from schemas import TalentUpdate
+        
+        user = get_user_by_email(email, db)
+        
+        talent = db.query(Talent).filter(Talent.id == talent_id, Talent.user_id == user.id).first()
+        if not talent:
+            raise HTTPException(status_code=404, detail="Talent not found or access denied")
+        
+        # Validate input
+        talent_update = TalentUpdate(**talent_data)
+        
+        # Update fields
+        if talent_update.name is not None:
+            talent.name = talent_update.name
+        if talent_update.description is not None:
+            talent.description = talent_update.description
+        if talent_update.rate is not None:
+            talent.rate = talent_update.rate
+        if talent_update.rating is not None:
+            talent.rating = talent_update.rating
+        if talent_update.reviews is not None:
+            talent.reviews = talent_update.reviews
+        if talent_update.skills is not None:
+            talent.skills = talent_update.skills
+        if talent_update.location is not None:
+            talent.location = talent_update.location
+        if talent_update.profile_url is not None:
+            talent.profile_url = talent_update.profile_url
+        if talent_update.image_url is not None:
+            talent.image_url = talent_update.image_url
+        
+        talent.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(talent)
+        
+        return {
+            "id": talent.id,
+            "user_id": talent.user_id,
+            "name": talent.name,
+            "description": talent.description,
+            "rate": talent.rate,
+            "rating": talent.rating,
+            "reviews": talent.reviews,
+            "skills": talent.skills,
+            "location": talent.location,
+            "profile_url": talent.profile_url,
+            "image_url": talent.image_url,
+            "created_at": talent.created_at.isoformat() if talent.created_at else None,
+            "updated_at": talent.updated_at.isoformat() if talent.updated_at else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating talent: {str(e)}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update talent")
+
+@app.delete("/api/talents/{talent_id}")
+async def delete_talent(
+    talent_id: int,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Delete a talent entry"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import Talent
+        user = get_user_by_email(email, db)
+        
+        talent = db.query(Talent).filter(Talent.id == talent_id, Talent.user_id == user.id).first()
+        if not talent:
+            raise HTTPException(status_code=404, detail="Talent not found or access denied")
+        
+        db.delete(talent)
+        db.commit()
+        
+        return {"success": True, "message": "Talent deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting talent: {str(e)}")
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete talent")

@@ -78,3 +78,43 @@ class SettingsResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+class TalentCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    rate: Optional[float] = None
+    rating: Optional[float] = None
+    reviews: Optional[int] = None
+    skills: Optional[List[str]] = []
+    location: Optional[str] = None
+    profile_url: Optional[str] = None
+    image_url: Optional[str] = None
+
+class TalentUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    rate: Optional[float] = None
+    rating: Optional[float] = None
+    reviews: Optional[int] = None
+    skills: Optional[List[str]] = None
+    location: Optional[str] = None
+    profile_url: Optional[str] = None
+    image_url: Optional[str] = None
+
+class TalentResponse(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    description: Optional[str] = None
+    rate: Optional[float] = None
+    rating: Optional[float] = None
+    reviews: Optional[int] = None
+    skills: List[str] = []
+    location: Optional[str] = None
+    profile_url: Optional[str] = None
+    image_url: Optional[str] = None
+    created_at: str
+    updated_at: str
+    
+    class Config:
+        from_attributes = True

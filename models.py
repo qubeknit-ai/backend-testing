@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -121,3 +121,23 @@ class SystemSettings(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Talent(Base):
+    __tablename__ = "talents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    rate = Column(Float, nullable=True)  # Hourly rate in USD
+    rating = Column(Float, nullable=True)  # Rating 0-5
+    reviews = Column(Integer, nullable=True)  # Number of reviews
+    skills = Column(JSON, default=list)  # List of skills
+    location = Column(String, nullable=True)
+    profile_url = Column(String, nullable=True)
+    image_url = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationship
+    user = relationship("User")
