@@ -14,6 +14,24 @@ load_dotenv()
 
 app = FastAPI()
 
+# Import and start background scheduler
+try:
+    from scheduler import start_scheduler, stop_scheduler
+    
+    @app.on_event("startup")
+    async def startup_event():
+        """Start background scheduler on app startup"""
+        start_scheduler()
+        print("[Startup] Background auto-fetch scheduler initialized")
+    
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """Stop background scheduler on app shutdown"""
+        stop_scheduler()
+        print("[Shutdown] Background auto-fetch scheduler stopped")
+except Exception as e:
+    print(f"[Warning] Could not initialize scheduler: {e}")
+
 # Lazy import database to avoid connection on startup
 def init_db():
     try:

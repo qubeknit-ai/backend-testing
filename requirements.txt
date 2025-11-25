@@ -8,3 +8,4 @@ pydantic[email]==2.9.2
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 python-jose[cryptography]==3.3.0
+APScheduler==3.10.4
