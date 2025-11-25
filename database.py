@@ -8,11 +8,14 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Add connection pool settings for better reliability
+# Connection pool settings optimized for Supabase Transaction Pooler
+# Transaction pooler (port 6543) is better for background tasks and serverless
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=300,
+    pool_pre_ping=True,  # Verify connections before using
+    pool_recycle=300,  # Recycle connections after 5 minutes
+    pool_size=5,  # Number of connections to maintain
+    max_overflow=10,  # Additional connections when pool is full
     connect_args={
         "connect_timeout": 10,
         "keepalives": 1,
