@@ -70,12 +70,14 @@ class UserSettings(Base):
     upwork_payment_verified = Column(Boolean, default=False)
     upwork_auto_fetch = Column(Boolean, default=False)
     upwork_auto_fetch_interval = Column(Integer, default=2)  # in minutes
+    upwork_last_auto_fetch = Column(DateTime, nullable=True)  # Last time auto-fetch ran
     
     # Freelancer settings
     freelancer_job_category = Column(String, default="Web Development")
     freelancer_max_jobs = Column(Integer, default=3)
     freelancer_auto_fetch = Column(Boolean, default=False)
     freelancer_auto_fetch_interval = Column(Integer, default=3)  # in minutes
+    freelancer_last_auto_fetch = Column(DateTime, nullable=True)  # Last time auto-fetch ran
     
     # AI Agent settings
     ai_agent_min_score = Column(Integer, default=2)  # Minimum score for auto-draft

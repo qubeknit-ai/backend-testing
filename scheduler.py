@@ -27,9 +27,6 @@ FREELANCER_WEBHOOK_URL = os.getenv('FREELANCER_WEBHOOK_URL')
 # Initialize scheduler
 scheduler = BackgroundScheduler()
 
-# Track last fetch time for each user/platform
-last_fetch_times = {}
-
 
 def get_db():
     """Get database session"""
@@ -109,13 +106,13 @@ async def fetch_upwork_for_user(user_id: int, user_email: str, settings: UserSet
             return
         
         # Check if enough time has passed since last fetch
-        key = f"upwork_{user_id}"
         now = datetime.utcnow()
         interval_minutes = settings.upwork_auto_fetch_interval or 2
         
-        if key in last_fetch_times:
-            time_since_last = (now - last_fetch_times[key]).total_seconds() / 60
+        if settings.upwork_last_auto_fetch:
+            time_since_last = (now - settings.upwork_last_auto_fetch).total_seconds() / 60
             if time_since_last < interval_minutes:
+                logger.debug(f"[Upwork] Skipping {user_email} - only {time_since_last:.1f} min since last fetch (need {interval_minutes})")
                 return  # Not enough time passed
         
         # Check and reset daily limit
@@ -141,8 +138,8 @@ async def fetch_upwork_for_user(user_id: int, user_email: str, settings: UserSet
             )
             
             if response.status_code == 200:
-                # Update last fetch time
-                last_fetch_times[key] = now
+                # Update last fetch time in database
+                settings.upwork_last_auto_fetch = now
                 
                 # Increment fetch count
                 user.upwork_fetch_count = (user.upwork_fetch_count or 0) + 1
@@ -183,13 +180,13 @@ async def fetch_freelancer_for_user(user_id: int, user_email: str, settings: Use
             return
         
         # Check if enough time has passed since last fetch
-        key = f"freelancer_{user_id}"
         now = datetime.utcnow()
         interval_minutes = settings.freelancer_auto_fetch_interval or 3
         
-        if key in last_fetch_times:
-            time_since_last = (now - last_fetch_times[key]).total_seconds() / 60
+        if settings.freelancer_last_auto_fetch:
+            time_since_last = (now - settings.freelancer_last_auto_fetch).total_seconds() / 60
             if time_since_last < interval_minutes:
+                logger.debug(f"[Freelancer] Skipping {user_email} - only {time_since_last:.1f} min since last fetch (need {interval_minutes})")
                 return  # Not enough time passed
         
         # Check and reset daily limit
@@ -215,8 +212,8 @@ async def fetch_freelancer_for_user(user_id: int, user_email: str, settings: Use
             )
             
             if response.status_code == 200:
-                # Update last fetch time
-                last_fetch_times[key] = now
+                # Update last fetch time in database
+                settings.freelancer_last_auto_fetch = now
                 
                 # Increment fetch count
                 user.freelancer_fetch_count = (user.freelancer_fetch_count or 0) + 1
