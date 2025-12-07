@@ -144,3 +144,17 @@ class Talent(Base):
     
     # Relationship
     user = relationship("User")
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False, index=True)
+    message = Column(Text, nullable=False)
+    sender = Column(String, nullable=False)  # 'user' or 'ai'
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User")
+    lead = relationship("Lead")

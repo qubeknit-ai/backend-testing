@@ -34,6 +34,7 @@ class UserResponse(BaseModel):
     name: Optional[str] = None
     telegram_chat_id: Optional[str] = None
     country: Optional[str] = None
+    ai_agent_model: Optional[str] = None
     
     class Config:
         from_attributes = True
