@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Query
+from fastapi import FastAPI, HTTPException, Depends, status, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text, Float
@@ -14,7 +14,7 @@ from cache_utils import cached, cleanup_cache
 import threading
 import time
 from schemas import UserSignup, UserLogin, Token, UserResponse, SettingsUpdate, SettingsResponse, UserProfileUpdate, TalentCreate, TalentUpdate, TalentResponse, FreelancerCredentialsCreate, FreelancerCredentialsResponse, FreelancerCredentialsUpdate
-from auth import get_password_hash, verify_password, create_access_token, verify_token
+from auth import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
 import json
 from urllib.parse import unquote
 
@@ -1388,6 +1388,62 @@ async def login(user_data: UserLogin, db: Session = Depends(get_db)):
     # Create access token
     access_token = create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/api/auth/debug")
+async def debug_auth(request: Request):
+    """Debug endpoint to check authentication headers and token format"""
+    try:
+        auth_header = request.headers.get("authorization")
+        print(f"🔍 [DEBUG_AUTH] Authorization header: {auth_header}")
+        
+        if not auth_header:
+            return {
+                "error": "No authorization header found",
+                "headers": dict(request.headers)
+            }
+        
+        if not auth_header.startswith("Bearer "):
+            return {
+                "error": "Invalid authorization header format",
+                "auth_header": auth_header,
+                "expected_format": "Bearer <token>"
+            }
+        
+        token = auth_header.split(" ")[1]
+        print(f"🔍 [DEBUG_AUTH] Extracted token: {token[:30]}...")
+        
+        # Try to decode without verification first
+        try:
+            import jwt
+            unverified_payload = jwt.decode(token, options={"verify_signature": False})
+            print(f"🔍 [DEBUG_AUTH] Unverified payload: {unverified_payload}")
+            
+            return {
+                "success": True,
+                "token_format": "valid_jwt",
+                "token_length": len(token),
+                "token_parts": len(token.split('.')),
+                "unverified_payload": unverified_payload,
+                "secret_key_prefix": SECRET_KEY[:10],
+                "algorithm": ALGORITHM
+            }
+        except Exception as decode_error:
+            print(f"🔍 [DEBUG_AUTH] Decode error: {decode_error}")
+            return {
+                "error": "Could not decode token",
+                "token_length": len(token),
+                "token_parts": len(token.split('.')),
+                "decode_error": str(decode_error),
+                "secret_key_prefix": SECRET_KEY[:10],
+                "algorithm": ALGORITHM
+            }
+            
+    except Exception as e:
+        print(f"🔍 [DEBUG_AUTH] General error: {e}")
+        return {
+            "error": "Debug failed",
+            "exception": str(e)
+        }
 
 @app.get("/api/auth/me", response_model=UserResponse)
 async def get_current_user(email: str = Depends(verify_token), db: Session = Depends(get_db)):

@@ -30,17 +30,46 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         token = credentials.credentials
         print(f"🔐 [AUTH] Verifying token: {token[:30]}...")
+        print(f"🔐 [AUTH] Token length: {len(token)}")
+        print(f"🔐 [AUTH] SECRET_KEY being used: {SECRET_KEY[:10]}...")
+        print(f"🔐 [AUTH] Algorithm: {ALGORITHM}")
+        
+        # Check if token looks like a JWT
+        parts = token.split('.')
+        print(f"🔐 [AUTH] Token parts count: {len(parts)}")
+        
+        if len(parts) != 3:
+            print(f"❌ [AUTH] Invalid JWT format - expected 3 parts, got {len(parts)}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token format"
+            )
+        
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         print(f"🔐 [AUTH] Extracted email from token: {email}")
         print(f"🔐 [AUTH] Token payload: {payload}")
+        print(f"🔐 [AUTH] Token expiry: {payload.get('exp')}")
+        
         if email is None:
             print(f"❌ [AUTH] No email found in token payload")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication credentials"
+                detail="Invalid authentication credentials - no email in token"
             )
         return email
+    except jwt.ExpiredSignatureError as e:
+        print(f"❌ [AUTH] Token expired: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired"
+        )
+    except jwt.InvalidTokenError as e:
+        print(f"❌ [AUTH] Invalid token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
     except JWTError as e:
         print(f"❌ [AUTH] JWT Error: {e}")
         raise HTTPException(
