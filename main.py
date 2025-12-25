@@ -69,6 +69,9 @@ async def startup_event():
                 }
                 autobidder.update_settings(settings_dict)
                 
+                # Explicitly start the service since we found enabled users
+                autobidder.start()
+                
                 print(f"✅ Auto-bidder starting automatically (enabled in database)")
                 print(f"   Settings: Budget ${settings_dict['min_budget']}-${settings_dict['max_budget']}, Frequency: {settings_dict['frequency_minutes']}min")
             else:

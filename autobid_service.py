@@ -34,9 +34,8 @@ class AutoBidder:
         logger.info(f"AutoBidder settings update requested: {new_settings}")
         # Settings are now stored per-user in database, not globally
         
-        # Start service if any user enables it
-        if new_settings.get("enabled") and not self._is_running:
-            self.start()
+        # Don't automatically start here - let manual start handle it
+        logger.info("Settings updated. Use start() method to begin auto-bidding.")
 
     def get_settings(self):
         """Get settings - now returns empty as settings are per-user in database"""
@@ -44,6 +43,7 @@ class AutoBidder:
 
     def start(self):
         if self._is_running:
+            logger.info("AutoBidder Service already running, ignoring start request")
             return
         
         self._is_running = True
@@ -51,9 +51,14 @@ class AutoBidder:
         logger.info("AutoBidder Service Started")
 
     def stop(self):
+        if not self._is_running:
+            logger.info("AutoBidder Service already stopped, ignoring stop request")
+            return
+            
         self._is_running = False
         if self._task:
             self._task.cancel()
+            self._task = None
         logger.info("AutoBidder Service Stopped")
 
     async def _loop(self):
