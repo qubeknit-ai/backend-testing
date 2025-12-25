@@ -205,8 +205,8 @@ class AutoBidSettings(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
     
     enabled = Column(Boolean, default=False)
-    min_budget = Column(Float, default=10.0)
-    max_budget = Column(Float, default=1000.0)
+    daily_bids = Column(Integer, default=10)  # Max bids per day
+    currencies = Column(JSON, default=lambda: ["USD"])  # Supported currencies
     frequency_minutes = Column(Integer, default=10)
     max_project_bids = Column(Integer, default=50)  # Max existing bids on project
     smart_bidding = Column(Boolean, default=True)  # Use average of min/max

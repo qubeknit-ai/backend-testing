@@ -151,8 +151,8 @@ class FreelancerCredentialsUpdate(BaseModel):
 
 class AutoBidSettings(BaseModel):
     enabled: Optional[bool] = None
-    min_budget: Optional[float] = None
-    max_budget: Optional[float] = None
+    daily_bids: Optional[int] = None
+    currencies: Optional[List[str]] = None
     frequency_minutes: Optional[int] = None
     max_project_bids: Optional[int] = None
     smart_bidding: Optional[bool] = None

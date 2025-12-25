@@ -61,8 +61,8 @@ async def startup_event():
                 # Update in-memory settings
                 settings_dict = {
                     "enabled": db_settings.enabled,
-                    "min_budget": float(db_settings.min_budget),
-                    "max_budget": float(db_settings.max_budget),
+                    "daily_bids": db_settings.daily_bids,
+                    "currencies": db_settings.currencies,
                     "frequency_minutes": db_settings.frequency_minutes,
                     "max_project_bids": db_settings.max_project_bids,
                     "smart_bidding": db_settings.smart_bidding
@@ -73,7 +73,7 @@ async def startup_event():
                 autobidder.start()
                 
                 print(f"✅ Auto-bidder starting automatically (enabled in database)")
-                print(f"   Settings: Budget ${settings_dict['min_budget']}-${settings_dict['max_budget']}, Frequency: {settings_dict['frequency_minutes']}min")
+                print(f"   Settings: Daily bids: {settings_dict['daily_bids']}, Currencies: {settings_dict['currencies']}, Frequency: {settings_dict['frequency_minutes']}min")
             else:
                 print("ℹ️  Auto-bidder not enabled in database, staying off")
         finally:
@@ -2407,8 +2407,8 @@ async def get_autobid_settings(email: str = Depends(verify_token), db: Session =
     
     return {
         "enabled": db_settings.enabled,
-        "min_budget": db_settings.min_budget,
-        "max_budget": db_settings.max_budget,
+        "daily_bids": db_settings.daily_bids,
+        "currencies": db_settings.currencies,
         "frequency_minutes": db_settings.frequency_minutes,
         "max_project_bids": db_settings.max_project_bids,
         "smart_bidding": db_settings.smart_bidding
@@ -2433,10 +2433,10 @@ async def update_autobid_settings(
     # Update fields
     if settings.enabled is not None:
         db_settings.enabled = settings.enabled
-    if settings.min_budget is not None:
-        db_settings.min_budget = settings.min_budget
-    if settings.max_budget is not None:
-        db_settings.max_budget = settings.max_budget
+    if settings.daily_bids is not None:
+        db_settings.daily_bids = settings.daily_bids
+    if settings.currencies is not None:
+        db_settings.currencies = settings.currencies
     if settings.frequency_minutes is not None:
         db_settings.frequency_minutes = settings.frequency_minutes
     if settings.max_project_bids is not None:
@@ -2450,8 +2450,8 @@ async def update_autobid_settings(
     # Update in-memory settings
     settings_dict = {
         "enabled": db_settings.enabled,
-        "min_budget": float(db_settings.min_budget),
-        "max_budget": float(db_settings.max_budget),
+        "daily_bids": db_settings.daily_bids,
+        "currencies": db_settings.currencies,
         "frequency_minutes": db_settings.frequency_minutes,
         "max_project_bids": db_settings.max_project_bids,
         "smart_bidding": db_settings.smart_bidding
@@ -3881,12 +3881,14 @@ async def get_freelancer_projects(
         if user_skills:
             # Use skills-based search with jobs[] parameters for each skill ID
             skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
-            search_url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&{skills_params}&languages[]=en"
+            # Add explicit sorting to get NEWEST projects first (same as autobid service)
+            search_url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
             print(f"🎯 Searching projects with user skills: {user_skills}")
             print(f"🔗 Search URL: {search_url}")
         else:
             # Fallback to recommended projects if no skills found
-            search_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&user_recommended=true"
+            # Add explicit sorting to get NEWEST projects first (same as autobid service)
+            search_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
             print("📋 Using recommended projects (no skills found)")
         
         # Apply additional filters if provided
@@ -3902,7 +3904,7 @@ async def get_freelancer_projects(
         if maxBudget:
             additional_params.append(f"max_budget={maxBudget}")
         
-        # No sorting - use Freelancer API default (newest first)
+        # No additional sorting needed - already added sort_field=time_submitted&sort_order=desc above
         
         # Combine all parameters
         all_params = existing_params

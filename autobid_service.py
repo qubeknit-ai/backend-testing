@@ -15,7 +15,7 @@ class AutoBidder:
     _instance = None
     _is_running = False
     _task = None
-    _user_last_bid_time = {}  # Track last bid time per user
+    _user_last_bid_time = {}  # Track last bid time per user (only when bid is PLACED)
     
     # Removed global settings - now using per-user settings from database
 
@@ -90,17 +90,18 @@ class AutoBidder:
                             # Convert DB model to dict settings
                             settings = {
                                 "enabled": db_setting.enabled,
-                                "min_budget": db_setting.min_budget,
-                                "max_budget": db_setting.max_budget,
+                                "daily_bids": db_setting.daily_bids,
+                                "currencies": db_setting.currencies,
                                 "frequency_minutes": db_setting.frequency_minutes,
                                 "max_project_bids": db_setting.max_project_bids,
                                 "smart_bidding": db_setting.smart_bidding
                             }
                             
-                            # Check if enough time has passed since last bid for this user
+                            # Check if enough time has passed since last SUCCESSFUL bid for this user
                             current_time = datetime.now()
                             last_bid_time = self._user_last_bid_time.get(user_id)
                             
+                            # Normal frequency check - only wait after SUCCESSFUL bids
                             if last_bid_time:
                                 time_since_last_bid = (current_time - last_bid_time).total_seconds() / 60
                                 if time_since_last_bid < settings["frequency_minutes"]:
@@ -137,7 +138,7 @@ class AutoBidder:
                     wait_seconds = int(smart_wait_minutes * 60)
                     logger.info(f"✅ Cycle complete for users {active_users}. Next check in {smart_wait_minutes} minutes ({wait_seconds}s) - min user frequency: {min_frequency_minutes}m")
                 else:
-                    wait_seconds = 300  # Default 5 minutes if no users
+                    wait_seconds = 30  # Check every 30 seconds if no users enabled
                     logger.info(f"✅ No enabled users. Waiting {wait_seconds} seconds...")
                 
                 # Add heartbeat log every cycle to prevent serverless timeout
@@ -153,9 +154,54 @@ class AutoBidder:
                 logger.error(traceback.format_exc())
                 await asyncio.sleep(60)
 
+    async def _check_daily_bid_limit(self, user_id: int, settings: Dict) -> bool:
+        """Check if user has reached their daily bid limit"""
+        daily_limit = settings.get("daily_bids", 10)
+        
+        try:
+            from database import SessionLocal
+            from models import BidHistory
+            from datetime import datetime, timedelta
+            
+            db = SessionLocal()
+            try:
+                # Get today's date range
+                today = datetime.now().date()
+                start_of_day = datetime.combine(today, datetime.min.time())
+                end_of_day = datetime.combine(today, datetime.max.time())
+                
+                # Count successful bids placed today
+                today_bids = db.query(BidHistory).filter(
+                    BidHistory.user_id == user_id,
+                    BidHistory.status == "success",
+                    BidHistory.created_at >= start_of_day,
+                    BidHistory.created_at <= end_of_day
+                ).count()
+                
+                logger.info(f"📊 User {user_id}: Daily bid count: {today_bids}/{daily_limit}")
+                
+                if today_bids >= daily_limit:
+                    logger.error(f"🚫 User {user_id}: Daily bid limit reached ({today_bids}/{daily_limit})! Disabling auto-bidding...")
+                    await self._disable_user_autobidding(user_id)
+                    return False
+                
+                return True
+                
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Error checking daily bid limit for User {user_id}: {e}")
+            return True  # Allow bidding if we can't check (fail-safe)
+
     async def _run_bid_cycle(self, user_id: int, settings: Dict):
         """Execute one complete bidding cycle for a specific user"""
         try:
+            # 0. Check daily bid limit first
+            if not await self._check_daily_bid_limit(user_id, settings):
+                logger.error(f"🚫 User {user_id}: Daily bid limit reached - stopping bid cycle")
+                return False
+            
             # 1. Fetch projects using existing API for THIS user
             projects = await self._fetch_projects(user_id)
             if not projects:
@@ -164,19 +210,32 @@ class AutoBidder:
 
             logger.info(f"📥 User {user_id}: Found {len(projects)} total projects")
 
+            # Don't filter by "seen" projects - let the database bid history handle filtering
+            # We want to process ALL projects and let the bid history check determine what to skip
+            projects_to_process = projects
+            logger.info(f"📥 User {user_id}: Processing all {len(projects_to_process)} projects (filtering by bid history)")
+
             # 2. Filter projects by criteria for THIS user
-            filtered_projects = self._filter_projects(projects, settings)
+            filtered_projects = self._filter_projects(projects_to_process, settings)
             if not filtered_projects:
-                logger.info(f"🔍 User {user_id}: No projects match criteria")
+                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)})")
                 return False
 
-            logger.info(f"✅ User {user_id}: {len(filtered_projects)} projects match criteria")
+            logger.info(f"✅ User {user_id}: {len(filtered_projects)} projects match criteria (currencies: {settings.get('currencies', ['USD'])})")
 
-            # 3. Sort by NEWEST first (time_submitted), then by HIGHEST budget - FIXED!
+            # 3. Sort by NEWEST first (time_submitted), then by HIGHEST budget
             filtered_projects.sort(key=lambda p: (
                 -(p.get("time_submitted", 0)),  # Negative for descending (newest first)
                 -(p.get("budget", {}).get("maximum", 0))  # Then by highest budget
             ))
+            
+            # Log the sorting to verify we're getting newest projects first
+            if filtered_projects:
+                logger.info(f"📅 User {user_id}: Projects sorted by newest first:")
+                for i, project in enumerate(filtered_projects[:3]):  # Show first 3
+                    time_submitted = project.get("time_submitted", 0)
+                    posted_time = self._format_time_ago(time_submitted) if time_submitted else "Unknown time"
+                    logger.info(f"   {i+1}. '{project.get('title', 'Unknown')[:40]}...' posted {posted_time}")
             
             # 4. Check database for already-bid projects
             from database import SessionLocal
@@ -192,21 +251,72 @@ class AutoBidder:
                 
                 logger.info(f"📋 User {user_id}: Already bid on {len(already_bid_set)} projects")
                 
+                # DEBUG: Log the actual bid history for this user (recent bids only)
+                if len(already_bid_set) > 0:
+                    bid_history_records = db.query(BidHistory).filter(
+                        BidHistory.user_id == user_id
+                    ).order_by(BidHistory.created_at.desc()).limit(5).all()
+                    
+                    logger.info(f"🔍 User {user_id}: Recent bid history (last 5):")
+                    for i, record in enumerate(bid_history_records):
+                        logger.info(f"   {i+1}. Project {record.project_id} - Status: {record.status} - Title: {record.project_title[:50]}...")
+                
+                # Only count SUCCESSFUL bids, not failed attempts
+                successful_bid_ids = db.query(BidHistory.project_id).filter(
+                    BidHistory.user_id == user_id,
+                    BidHistory.status == "success"
+                ).all()
+                successful_bid_set = set(str(row.project_id) for row in successful_bid_ids)
+                
+                logger.info(f"✅ User {user_id}: Successfully bid on {len(successful_bid_set)} projects (excluding failed attempts)")
+                
+                # Use successful bids for filtering, not all attempts
+                already_bid_set = successful_bid_set
+                
                 # Try to bid on projects in order (best first) until one succeeds
                 for project in filtered_projects:
                     project_id = str(project.get("id"))
+                    project_title = project.get("title", "Unknown")[:50]
                     
                     if project_id in already_bid_set:
-                        logger.debug(f"⏭️  Skipping {project.get('title')} - already bid")
+                        logger.debug(f"⏭️  User {user_id}: Skipping '{project_title}...' (Project ID: {project_id}) - already successfully bid")
                         continue
                     
-                    logger.info(f"🎯 User {user_id}: Attempting bid on '{project.get('title')}'")
+                    # Log project details before attempting bid
+                    time_submitted = project.get("time_submitted", 0)
+                    posted_time = self._format_time_ago(time_submitted) if time_submitted else "Unknown time"
+                    budget = project.get("budget", {})
+                    budget_str = f"${budget.get('minimum', 0)}-${budget.get('maximum', 0)}"
+                    project_currency = self._get_project_currency(project)
+                    
+                    # Debug: Log timestamp details
+                    if time_submitted:
+                        import time
+                        current_timestamp = time.time()
+                        logger.info(f"🕐 Debug timestamps - Current: {current_timestamp}, Project: {time_submitted}, Diff: {current_timestamp - time_submitted} seconds")
+                    
+                    logger.info(f"🎯 User {user_id}: Attempting bid on project '{project_title}...' (ID: {project_id})")
+                    logger.info(f"   � BPosted: {posted_time}")
+                    logger.info(f"   � Budget: {bjudget_str} ({project_currency})")
+                    logger.info(f"   👥 Bids: {project.get('bid_stats', {}).get('bid_count', 0)}")
                     
                     try:
                         bid_result = await self._bid_on_project(user_id, project, settings)
-                        if bid_result:
+                        if bid_result == True:
                             logger.info(f"✅ User {user_id}: Successfully placed bid!")
+                            
+                            # Check if we've now reached the daily limit after this successful bid
+                            if not await self._check_daily_bid_limit(user_id, settings):
+                                logger.info(f"🚫 User {user_id}: Daily bid limit reached after successful bid - stopping cycle")
+                                return True  # Return True because we did place a bid successfully
+                            
                             return True
+                        elif bid_result == "BID_LIMIT_REACHED":
+                            logger.error(f"🚫 User {user_id}: Bid limit reached - stopping bid cycle for this user")
+                            return False  # Stop the entire cycle for this user
+                        elif bid_result == "CREDENTIALS_EXPIRED":
+                            logger.error(f"🔐 User {user_id}: Credentials expired - stopping bid cycle for this user")
+                            return False  # Stop the entire cycle for this user
                         else:
                             logger.info(f"❌ User {user_id}: Bid failed, trying next project...")
                             continue
@@ -218,6 +328,30 @@ class AutoBidder:
                 db.close()
             
             logger.info(f"ℹ️  User {user_id}: No successful bids placed this cycle")
+            
+            # Detailed summary of why no bids were placed
+            logger.info(f"📊 User {user_id}: CYCLE SUMMARY:")
+            logger.info(f"   📥 Total projects fetched: {len(projects)}")
+            logger.info(f"   ✅ Projects matching criteria: {len(filtered_projects)}")
+            logger.info(f"   🚫 Already successfully bid on: {len(already_bid_set)}")
+            
+            # Show which projects were available but not bid on
+            available_projects = [p for p in filtered_projects if str(p.get('id')) not in already_bid_set]
+            logger.info(f"   🎯 Available to bid on: {len(available_projects)}")
+            
+            if available_projects:
+                logger.info(f"   📋 Available projects not bid on:")
+                for i, project in enumerate(available_projects[:5]):  # Show first 5
+                    logger.info(f"      {i+1}. '{project.get('title', 'Unknown')[:40]}...' (ID: {project.get('id')})")
+                if len(available_projects) > 5:
+                    logger.info(f"      ... and {len(available_projects) - 5} more")
+            
+            # Log why no bids were placed
+            if len(available_projects) == 0:
+                logger.info(f"💡 User {user_id}: All matching projects have already been successfully bid on - no new opportunities")
+            else:
+                logger.info(f"💡 User {user_id}: {len(available_projects)} unbid projects available but bidding failed - check credentials or bid limits")
+            
             return False
 
         except Exception as e:
@@ -285,378 +419,98 @@ class AutoBidder:
                         logger.warning(f"⚠️  User {user_id}: Could not get user profile: {user_response.status_code}")
                         logger.warning(f"⚠️  User {user_id}: Profile response: {user_response.text[:300]}...")
                     
-                    # Step 2: Build URL with user skills - FIXED to get LATEST projects
-                    if user_skills:
-                        skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
-                        # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
-                        url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
-                    else:
-                        # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
-                        url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
-                    
-                    logger.info(f"🌐 User {user_id}: Using URL: {url[:100]}...")
-                    
-                    # Step 3: Fetch projects
-                    logger.info(f"📡 User {user_id}: Fetching projects...")
-                    
-                    response = await client.get(
-                        url,
-                        headers=headers,
-                        cookies=cookies_dict
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        logger.info(f"🔍 User {user_id}: API Response structure: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                    # Step 2: Try different fetch limits to find new projects
+                    projects = []
+                    for limit in [50, 100, 150]:  # Try increasing limits
+                        logger.info(f"🔍 User {user_id}: Trying to fetch {limit} projects...")
                         
-                        result = data.get("result", {})
-                        if isinstance(result, dict):
-                            projects = result.get("projects", [])
-                            logger.info(f"📊 User {user_id}: Result keys: {list(result.keys())}")
-                        else:
-                            projects = []
-                            logger.warning(f"⚠️  User {user_id}: Unexpected result format: {type(result)}")
-                        
-                        logger.info(f"✅ User {user_id}: Successfully fetched {len(projects)} projects")
-                        
-                        # Log first few projects with their posting times for debugging
-                        if projects and len(projects) > 0:
-                            first_project = projects[0]
-                            logger.info(f"📝 User {user_id}: Sample project keys: {list(first_project.keys()) if isinstance(first_project, dict) else type(first_project)}")
-                            
-                            # Log posting times of first 3 projects to verify we're getting latest
-                            for i, project in enumerate(projects[:3]):
-                                time_submitted = project.get("time_submitted", 0)
-                                if time_submitted:
-                                    posted_time = self._format_time_ago(time_submitted)
-                                    logger.info(f"📅 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' posted {posted_time}")
-                                else:
-                                    logger.info(f"📅 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' - no timestamp")
-                        
-                        # If no projects found with skills, try without skills filter - FIXED to get LATEST
-                        if len(projects) == 0 and user_skills:
-                            logger.info(f"🔄 User {user_id}: No projects with skills filter, trying general search...")
+                        # Build URL with user skills - FIXED to get LATEST projects
+                        if user_skills:
+                            skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
                             # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
-                            fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc"
-                            
-                            fallback_response = await client.get(
-                                fallback_url,
-                                headers=headers,
-                                cookies=cookies_dict
-                            )
-                            
-                            if fallback_response.status_code == 200:
-                                fallback_data = fallback_response.json()
-                                fallback_result = fallback_data.get("result", {})
-                                if isinstance(fallback_result, dict):
-                                    projects = fallback_result.get("projects", [])
-                                    logger.info(f"🔄 User {user_id}: Fallback search found {len(projects)} projects")
-                            elif fallback_response.status_code == 401:
-                                logger.error(f"🔐 User {user_id}: Freelancer credentials EXPIRED (401) - user needs to refresh session")
-                                logger.error(f"🔐 User {user_id}: AutoBidder will skip this user until credentials are refreshed")
-                                return []
+                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit={limit}&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
+                        else:
+                            # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
+                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit={limit}&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
                         
-                        return projects
-                    elif response.status_code == 401:
-                        logger.error(f"🔐 User {user_id}: Freelancer credentials EXPIRED (401) - user needs to refresh session")
-                        logger.error(f"🔐 User {user_id}: AutoBidder will skip this user until credentials are refreshed")
-                        logger.error(f"🔐 User {user_id}: User should open Freelancer.com in browser to refresh cookies")
+                        logger.info(f"🌐 User {user_id}: Using URL: {url[:100]}...")
                         
-                        # Mark credentials as expired in database
-                        try:
-                            from database import SessionLocal
-                            from models import FreelancerCredentials
-                            
-                            db = SessionLocal()
-                            try:
-                                credentials = db.query(FreelancerCredentials).filter(
-                                    FreelancerCredentials.user_id == user_id
-                                ).first()
-                                
-                                if credentials:
-                                    credentials.is_validated = False  # Mark as invalid
-                                    db.commit()
-                                    logger.info(f"🔐 User {user_id}: Marked credentials as expired in database")
-                            finally:
-                                db.close()
-                        except Exception as e:
-                            logger.error(f"❌ Failed to update credential status: {e}")
+                        # Step 3: Fetch projects
+                        logger.info(f"📡 User {user_id}: Fetching projects...")
                         
-                        return []
-                    else:
-                        logger.error(f"❌ User {user_id}: Failed to fetch projects: HTTP {response.status_code}")
-                        logger.error(f"❌ User {user_id}: Response body: {response.text[:500]}...")
-                        return []
-                        
-            finally:
-                db.close()
-                
-        except Exception as e:
-            logger.error(f"❌ Error fetching projects for User {user_id}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return []
-
-    def _filter_projects(self, projects: List[Dict], settings: Dict) -> List[Dict]:
-        """Filter projects based on settings"""
-        
-        min_budget = settings.get("min_budget", 10)
-        max_budget = settings.get("max_budget", 1000)
-        max_bids = settings.get("max_project_bids", 50)
-        
-        filtered = []
-
-        for project in projects:
-            # Check budget
-            budget = project.get("budget", {})
-            project_min = budget.get("minimum", 0)
-            project_max = budget.get("maximum", project_min)
-            
-            if project_min < min_budget or project_max > max_budget:
-                continue
-
-            # Check bid count
-            bid_count = project.get("bid_stats", {}).get("bid_count", 0)
-            if bid_count > max_bids:
-                continue
-
-            filtered.append(project)
-        
-        return filtered
-
-    async def _bid_on_project(self, user_id: int, project: Dict, settings: Dict):
-        """Place a REAL bid on Freelancer.com with AI-generated proposal"""
-        logger.info(f"\n💼 User {user_id}: BIDDING ON PROJECT")
-        
-        try:
-            title = project.get("title", "Unknown")
-            project_id = project.get("id")
-            
-            # Calculate bid amount
-            budget = project.get("budget", {})
-            min_budget = budget.get("minimum", 50)
-            max_budget = budget.get("maximum", min_budget)
-            
-            if settings.get("smart_bidding"):
-                bid_amount = (min_budget + max_budget) / 2
-            else:
-                bid_amount = min_budget
-
-            bid_amount = round(bid_amount, 2)
-
-            # Step 1: Generate AI proposal using webhook
-            logger.info(f"🤖 User {user_id}: Generating AI proposal...")
-            
-            import os
-            webhook_url = os.getenv("FREELANCER_PROPOSAL_WEBHOOK_URL")
-            
-            if not webhook_url:
-                logger.warning("⚠️  FREELANCER_PROPOSAL_WEBHOOK_URL not configured")
-                proposal = f"I can help you with this project. My bid is ${bid_amount}."
-            else:
-                try:
-                    project_data = {
-                        "id": project_id,
-                        "title": title,
-                        "description": project.get("preview_description", project.get("description", "No description available")),
-                        "preview_description": project.get("preview_description", ""),
-                        "url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
-                        "budget": {
-                            "minimum": min_budget,
-                            "maximum": max_budget,
-                            "currency": "USD"
-                        },
-                        "bid_count": project.get("bid_stats", {}).get("bid_count", 0),
-                        "skills": [job.get("name") for job in project.get("jobs", [])] if project.get("jobs") else []
-                    }
-                    
-                    payload = {
-                        "user_id": user_id,
-                        "user_email": "autobidder@system",
-                        "project": project_data
-                    }
-                    
-                    headers = {"Content-Type": "application/json"}
-                    api_key = os.getenv("N8N_WEBHOOK_API_KEY")
-                    if api_key:
-                        headers["X-API-Key"] = api_key
-                    
-                    async with httpx.AsyncClient(timeout=300.0) as client:
-                        response = await client.post(webhook_url, json=payload, headers=headers)
+                        response = await client.get(
+                            url,
+                            headers=headers,
+                            cookies=cookies_dict
+                        )
                         
                         if response.status_code == 200:
-                            try:
-                                response_text = response.text
-                                logger.info(f"🔍 User {user_id}: Webhook response text: {response_text[:500]}...")
-                                
-                                data = response.json()
-                                logger.info(f"🔍 User {user_id}: Webhook response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
-                                
-                                # Try multiple possible response formats
-                                proposal = None
-                                if isinstance(data, dict):
-                                    # Try different possible paths
-                                    proposal = (data.get("data", {}).get("proposal") or 
-                                              data.get("proposal") or 
-                                              data.get("result", {}).get("proposal") or
-                                              data.get("output") or  # Added for your webhook format
-                                              data.get("message") or
-                                              data.get("text"))
-                                elif isinstance(data, str):
-                                    proposal = data
-                                
-                                if not proposal or proposal.strip() == "":
-                                    logger.error(f"❌ User {user_id}: No proposal found in response structure: {data}")
-                                    raise Exception("Empty proposal")
-                                    
-                                logger.info(f"✅ User {user_id}: AI Proposal Generated ({len(proposal)} chars)")
-                            except Exception as parse_error:
-                                logger.error(f"❌ User {user_id}: Parse error: {parse_error}")
-                                logger.error(f"❌ User {user_id}: Raw response: {response.text}")
-                                raise Exception(f"Failed to parse AI proposal: {parse_error}")
-                        else:
-                            raise Exception(f"AI failed: {response.status_code}")
-                except Exception as e:
-                    logger.error(f"❌ User {user_id}: Error generating AI proposal: {e}")
-                    logger.info("⏭️  Skipping this project")
-                    return False
-            
-            # Step 2: Get Freelancer credentials and place REAL bid
-            from database import SessionLocal
-            from models import FreelancerCredentials
-            import json
-            
-            db = SessionLocal()
-            try:
-                credentials = db.query(FreelancerCredentials).filter(
-                    FreelancerCredentials.user_id == user_id
-                ).first()
-                
-                if not credentials:
-                    raise Exception("No credentials found")
-                
-                cookies_dict = {}
-                csrf_token = None
-                
-                if credentials.cookies:
-                    cookie_data = credentials.cookies if isinstance(credentials.cookies, dict) else json.loads(credentials.cookies)
-                    
-                    user_id_cookie = cookie_data.get('GETAFREE_USER_ID')
-                    auth_hash = cookie_data.get('GETAFREE_AUTH_HASH_V2')
-                    csrf_token = cookie_data.get('XSRF_TOKEN')
-                    session2 = cookie_data.get('session2')
-                    
-                    if not user_id_cookie or not auth_hash or not session2:
-                        raise Exception("Missing required cookies")
-                        
-                    cookies_dict = {
-                        "GETAFREE_USER_ID": user_id_cookie,
-                        "GETAFREE_AUTH_HASH_V2": auth_hash,
-                        "session2": session2
-                    }
-                    if cookie_data.get('qfence'):
-                         cookies_dict['qfence'] = cookie_data['qfence']
-                
-                headers = {
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept": "application/json, text/plain, */*",
-                    "Origin": "https://www.freelancer.com",
-                    "Referer": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
-                    "x-requested-with": "XMLHttpRequest"
-                }
-                
-                if user_id_cookie and auth_hash:
-                    headers["freelancer-auth-v2"] = f"{user_id_cookie};{auth_hash}"
-                
-                if csrf_token:
-                    headers["X-CSRF-Token"] = csrf_token
-                    headers["X-XSRF-TOKEN"] = csrf_token
-                    headers["x-csrf-token"] = csrf_token
-                    headers["x-xsrf-token"] = csrf_token
-
-                if credentials.access_token and credentials.access_token != "using_cookies":
-                    headers["Authorization"] = f"Bearer {credentials.access_token}"
-                    headers["freelancer-oauth-v1"] = credentials.access_token
-                
-                bid_payload = {
-                    "project_id": int(project_id),
-                    "bidder_id": int(user_id_cookie),
-                    "amount": float(bid_amount),
-                    "period": 7,
-                    "milestone_percentage": 100,
-                    "highlighted": False,
-                    "sponsored": False,
-                    "ip_contract": False,
-                    "anonymous": False,
-                    "description": proposal
-                }
-                
-                api_url = "https://www.freelancer.com/api/projects/0.1/bids/?compact=true&new_errors=true&new_pools=true"
-                
-                logger.info(f"📤 User {user_id}: Sending bid request...")
-                
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    bid_response = await client.post(
-                        api_url,
-                        headers=headers,
-                        cookies=cookies_dict,
-                        json=bid_payload
-                    )
-                    
-                    logger.info(f"📨 Response: {bid_response.status_code}")
-                    response_text = bid_response.text
-                    
-                    if bid_response.status_code == 200 or bid_response.status_code == 201:
-                        try:
-                            response_data = bid_response.json()
-                            if response_data.get("status") == "error":
-                                error_message = response_data.get("message", "Unknown error")
-                                logger.error(f"❌ User {user_id}: Freelancer returned error: {error_message}")
-                                
-                                # Check if it's "already bid" error - don't save to history, just return False
-                                if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
-                                    logger.info(f"⏭️  User {user_id}: Already bid error detected, moving to next project...")
-                                    return False
-                                
-                                # For other errors, save to history
-                                await self._save_bid_history({
-                                    "user_id": user_id,
-                                    "project_id": str(project_id),
-                                    "project_title": title,
-                                    "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
-                                    "bid_amount": bid_amount,
-                                    "proposal_text": proposal,
-                                    "status": "failed",
-                                    "error_message": error_message
-                                })
-                                return False
+                            data = response.json()
+                            logger.info(f"🔍 User {user_id}: API Response structure: {list(data.keys()) if isinstance(data, dict) else type(data)}")
                             
-                            logger.info(f"✅ User {user_id}: BID PLACED SUCCESSFULLY!")
-                            logger.info(f"   Bid ID: {response_data.get('result', {}).get('id', 'N/A')}")
+                            result = data.get("result", {})
+                            if isinstance(result, dict):
+                                projects = result.get("projects", [])
+                                logger.info(f"📊 User {user_id}: Result keys: {list(result.keys())}")
+                            else:
+                                projects = []
+                                logger.warning(f"⚠️  User {user_id}: Unexpected result format: {type(result)}")
                             
-                        except Exception as e:
-                            logger.warning(f"⚠️  Could not parse response: {e}")
-                        
-                        await self._save_bid_history({
-                            "user_id": user_id,
-                            "project_id": str(project_id),
-                            "project_title": title,
-                            "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
-                            "bid_amount": bid_amount,
-                            "proposal_text": proposal,
-                            "status": "success"
-                        })
-                        return True
-                    else:
-                        error_text = bid_response.text
-                        logger.error(f"❌ User {user_id}: Bid failed: {bid_response.status_code}")
-                        
-                        # Handle 401 Unauthorized (expired credentials) specially
-                        if bid_response.status_code == 401:
-                            logger.error(f"🔐 User {user_id}: Freelancer credentials EXPIRED (401) during bidding")
-                            logger.error(f"🔐 User {user_id}: User needs to refresh session by opening Freelancer.com in browser")
+                            logger.info(f"✅ User {user_id}: Successfully fetched {len(projects)} projects with limit {limit}")
+                            
+                            # Check if we have enough projects or if we should try a higher limit
+                            if len(projects) >= limit * 0.8:  # If we got close to the limit, try higher
+                                logger.info(f"🔄 User {user_id}: Got {len(projects)}/{limit} projects, trying higher limit...")
+                                continue
+                            else:
+                                logger.info(f"✅ User {user_id}: Got {len(projects)}/{limit} projects, sufficient for processing")
+                                break
+                                
+                        elif response.status_code == 401:
+                            logger.error(f"🔐 User {user_id}: Freelancer credentials EXPIRED (401) - user needs to refresh session")
                             logger.error(f"🔐 User {user_id}: AutoBidder will skip this user until credentials are refreshed")
+                            return []
+                        else:
+                            logger.error(f"❌ User {user_id}: Failed to fetch projects: HTTP {response.status_code}")
+                            logger.error(f"❌ User {user_id}: Response body: {response.text[:500]}...")
+                            break
+                    
+                    # Log first few projects with their posting times for debugging
+                    if projects and len(projects) > 0:
+                        first_project = projects[0]
+                        logger.info(f"📝 User {user_id}: Sample project keys: {list(first_project.keys()) if isinstance(first_project, dict) else type(first_project)}")
+                        
+                        # Log posting times of first 3 projects to verify we're getting latest
+                        for i, project in enumerate(projects[:3]):
+                            time_submitted = project.get("time_submitted", 0)
+                            if time_submitted:
+                                posted_time = self._format_time_ago(time_submitted)
+                                logger.info(f"� Use r {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' posted {posted_time}")
+                            else:
+                                logger.info(f"� User {uuser_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' - no timestamp")
+                    
+                    # If no projects found with skills, try without skills filter - FIXED to get LATEST
+                    if len(projects) == 0 and user_skills:
+                        logger.info(f"🔄 User {user_id}: No projects with skills filter, trying general search...")
+                        # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
+                        fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=100&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc"
+                        
+                        fallback_response = await client.get(
+                            fallback_url,
+                            headers=headers,
+                            cookies=cookies_dict
+                        )
+                        
+                        if fallback_response.status_code == 200:
+                            fallback_data = fallback_response.json()
+                            fallback_result = fallback_data.get("result", {})
+                            if isinstance(fallback_result, dict):
+                                projects = fallback_result.get("projects", [])
+                                logger.info(f"🔄 User {user_id}: Fallback search found {len(projects)} projects")
+                        elif fallback_response.status_code == 401:
+                            logger.error(f"🔐 User {user_id}: Freelancer credentials EXPIRED (401) - user needs to refresh session")
+                            logger.error(f"🔐 User {user_id}: AutoBidder will skip this user until credentials are refreshed")
+                            logger.error(f"🔐 User {user_id}: User should open Freelancer.com in browser to refresh cookies")
                             
                             # Mark credentials as expired in database
                             try:
@@ -678,38 +532,235 @@ class AutoBidder:
                             except Exception as e:
                                 logger.error(f"❌ Failed to update credential status: {e}")
                             
-                            return False
+                            return []
+                    
+                    return projects
                         
-                        try:
-                            error_data = bid_response.json()
-                            error_message = error_data.get('message') or error_data.get('error') or str(error_data)
-                        except:
-                            error_message = error_text or f"HTTP {bid_response.status_code}"
-                        
-                        # Check if it's "already bid" error - don't save to history
-                        if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
-                            logger.info(f"⏭️  User {user_id}: Already bid error detected, moving to next project...")
-                            return False
-                        
-                        await self._save_bid_history({
-                            "user_id": user_id,
-                            "project_id": str(project_id),
-                            "project_title": title,
-                            "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
-                            "bid_amount": bid_amount,
-                            "proposal_text": proposal,
-                            "status": "failed",
-                            "error_message": error_message
-                        })
-                        return False
             finally:
                 db.close()
-
+                
         except Exception as e:
-            logger.error(f"❌ ERROR BIDDING ON PROJECT for User {user_id}: {e}")
+            logger.error(f"❌ Error fetching projects for User {user_id}: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            return False
+            return []
+
+    def _get_project_currency(self, project: Dict) -> str:
+        """Extract currency from project data"""
+        budget = project.get("budget", {})
+        
+        # Method 1: Check budget.currency
+        if budget.get("currency"):
+            if isinstance(budget["currency"], str):
+                return budget["currency"]
+            elif isinstance(budget["currency"], dict):
+                if budget["currency"].get("code"):
+                    return budget["currency"]["code"]
+                elif budget["currency"].get("id"):
+                    # Freelancer API currency mapping based on common IDs
+                    currency_map = {
+                        1: 'USD', 2: 'EUR', 3: 'GBP', 4: 'AUD', 5: 'CAD', 6: 'INR', 7: 'JPY', 8: 'CNY',
+                        9: 'BRL', 10: 'MXN', 11: 'ZAR', 12: 'SGD', 13: 'NZD', 14: 'HKD', 15: 'SEK',
+                        16: 'NOK', 17: 'DKK', 18: 'PLN', 19: 'CHF', 20: 'RUB', 21: 'TRY', 22: 'THB',
+                        23: 'PHP', 24: 'IDR', 25: 'MYR', 26: 'VND', 27: 'KRW', 28: 'AED', 29: 'SAR',
+                        30: 'PKR', 31: 'BDT', 32: 'NGN', 33: 'EGP', 34: 'ARS', 35: 'CLP', 36: 'COP',
+                        37: 'PEN', 38: 'UAH', 39: 'ILS', 40: 'CZK', 41: 'HUF', 42: 'RON'
+                    }
+                    return currency_map.get(budget["currency"]["id"], "USD")
+        
+        # Method 2: Check budget.currency_id
+        if budget.get("currency_id"):
+            currency_map = {
+                1: 'USD', 2: 'EUR', 3: 'GBP', 4: 'AUD', 5: 'CAD', 6: 'INR', 7: 'JPY', 8: 'CNY',
+                28: 'AED'  # Added AED mapping
+            }
+            return currency_map.get(budget["currency_id"], "USD")
+        
+        # Method 3: Check project-level currency fields
+        if project.get("currency"):
+            if isinstance(project["currency"], str):
+                return project["currency"]
+            elif isinstance(project["currency"], dict) and project["currency"].get("code"):
+                return project["currency"]["code"]
+        
+        # Method 4: Try to detect from client location as fallback
+        if project.get("owner"):
+            client_country = None
+            if project["owner"].get("location", {}).get("country", {}).get("code"):
+                client_country = project["owner"]["location"]["country"]["code"]
+            elif project["owner"].get("country", {}).get("code"):
+                client_country = project["owner"]["country"]["code"]
+            
+            if client_country:
+                country_currency_map = {
+                    'GB': 'GBP', 'UK': 'GBP', 'CA': 'CAD', 'AU': 'AUD', 'IN': 'INR',
+                    'JP': 'JPY', 'CN': 'CNY', 'BR': 'BRL', 'MX': 'MXN', 'ZA': 'ZAR',
+                    'SG': 'SGD', 'NZ': 'NZD', 'HK': 'HKD', 'SE': 'SEK', 'NO': 'NOK',
+                    'DK': 'DKK', 'PL': 'PLN', 'CH': 'CHF', 'RU': 'RUB', 'TR': 'TRY',
+                    'TH': 'THB', 'PH': 'PHP', 'ID': 'IDR', 'MY': 'MYR', 'VN': 'VND',
+                    'KR': 'KRW', 'AE': 'AED', 'SA': 'SAR', 'PK': 'PKR', 'BD': 'BDT',
+                    'NG': 'NGN', 'EG': 'EGP'
+                }
+                return country_currency_map.get(client_country, "USD")
+        
+        # Default fallback
+        return "USD"
+
+    def _filter_projects(self, projects: List[Dict], settings: Dict) -> List[Dict]:
+        """Filter projects based on settings"""
+        
+        max_bids = settings.get("max_project_bids", 50)
+        supported_currencies = settings.get("currencies", ["USD"])
+        
+        filtered = []
+
+        for project in projects:
+            # Only check bid count - removed budget filtering
+            bid_count = project.get("bid_stats", {}).get("bid_count", 0)
+            if bid_count > max_bids:
+                continue
+
+            # Check if project currency is in user's supported currencies
+            project_currency = self._get_project_currency(project)
+            if project_currency not in supported_currencies:
+                logger.debug(f"Skipping project {project.get('id')} - currency {project_currency} not in supported currencies {supported_currencies}")
+                continue
+
+            filtered.append(project)
+        
+        return filtered
+
+    async def _generate_proposal(self, user_id: int, project: Dict, bid_amount: float) -> str:
+        """Generate AI proposal for a project"""
+        logger.info(f"🤖 User {user_id}: Generating AI proposal...")
+        
+        import os
+        webhook_url = os.getenv("FREELANCER_PROPOSAL_WEBHOOK_URL")
+        
+        if not webhook_url:
+            logger.warning("⚠️  FREELANCER_PROPOSAL_WEBHOOK_URL not configured")
+            return f"I can help you with this project. My bid is ${bid_amount}."
+        
+        try:
+            title = project.get("title", "Unknown")
+            project_id = project.get("id")
+            budget = project.get("budget", {})
+            min_budget = budget.get("minimum", 50)
+            max_budget = budget.get("maximum", min_budget)
+            
+            project_data = {
+                "id": project_id,
+                "title": title,
+                "description": project.get("preview_description", project.get("description", "No description available")),
+                "preview_description": project.get("preview_description", ""),
+                "budget": {
+                    "minimum": min_budget,
+                    "maximum": max_budget,
+                    "currency": "USD"
+                },
+                "bid_count": project.get("bid_stats", {}).get("bid_count", 0),
+                "skills": [job.get("name") for job in project.get("jobs", [])] if project.get("jobs") else []
+            }
+            
+            payload = {
+                "user_id": user_id,
+                "user_email": "autobidder@system",
+                "project": project_data
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+            if api_key:
+                headers["X-API-Key"] = api_key
+            
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                response = await client.post(webhook_url, json=payload, headers=headers)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    logger.info(f"🔍 User {user_id}: Webhook response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                    
+                    # Try multiple possible response formats
+                    proposal = None
+                    if isinstance(data, dict):
+                        proposal = (data.get("data", {}).get("proposal") or 
+                                  data.get("proposal") or 
+                                  data.get("result", {}).get("proposal") or
+                                  data.get("output") or
+                                  data.get("message") or
+                                  data.get("text"))
+                    elif isinstance(data, str):
+                        proposal = data
+                    
+                    if not proposal or proposal.strip() == "":
+                        logger.error(f"❌ User {user_id}: No proposal found in response structure: {data}")
+                        raise Exception("Empty proposal")
+                        
+                    logger.info(f"✅ User {user_id}: AI Proposal Generated ({len(proposal)} chars)")
+                    return proposal
+                else:
+                    raise Exception(f"AI failed: {response.status_code}")
+                    
+        except Exception as e:
+            logger.error(f"❌ User {user_id}: Error generating AI proposal: {e}")
+            raise Exception(f"Failed to generate proposal: {e}")
+
+    def _build_bid_payload(self, user_id: int, project: Dict, bid_amount: float, proposal: str, user_id_cookie: str) -> Dict:
+        """Build the bid payload for Freelancer API"""
+        project_id = project.get("id")
+        
+        return {
+            "project_id": int(project_id),
+            "bidder_id": int(user_id_cookie),
+            "amount": float(bid_amount),
+            "period": 7,
+            "milestone_percentage": 100,
+            "highlighted": False,
+            "sponsored": False,
+            "ip_contract": False,
+            "anonymous": False,
+            "description": proposal
+        }
+
+    def _get_freelancer_headers(self, project: Dict, user_id_cookie: str, auth_hash: str, csrf_token: str, access_token: str) -> Dict:
+        """Build headers for Freelancer API requests"""
+        project_id = project.get("id")
+        
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.freelancer.com",
+            "Referer": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
+            "x-requested-with": "XMLHttpRequest"
+        }
+        
+        if user_id_cookie and auth_hash:
+            headers["freelancer-auth-v2"] = f"{user_id_cookie};{auth_hash}"
+        
+        if csrf_token:
+            headers["X-CSRF-Token"] = csrf_token
+            headers["X-XSRF-TOKEN"] = csrf_token
+            headers["x-csrf-token"] = csrf_token
+            headers["x-xsrf-token"] = csrf_token
+
+        if access_token and access_token != "using_cookies":
+            headers["Authorization"] = f"Bearer {access_token}"
+            headers["freelancer-oauth-v1"] = access_token
+        
+        return headers
+
+    async def _submit_bid(self, headers: Dict, cookies_dict: Dict, bid_payload: Dict) -> httpx.Response:
+        """Submit bid to Freelancer API"""
+        api_url = "https://www.freelancer.com/api/projects/0.1/bids/?compact=true&new_errors=true&new_pools=true"
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            return await client.post(
+                api_url,
+                headers=headers,
+                cookies=cookies_dict,
+                json=bid_payload
+            )
     
     def _format_time_ago(self, timestamp):
         """Format timestamp to 'X hours/days ago' like manual flow"""
@@ -717,11 +768,19 @@ class AutoBidder:
             return "Unknown"
         
         from datetime import datetime
-        now = datetime.utcnow()
-        posted = datetime.fromtimestamp(timestamp)
-        diff = now - posted
+        import time
         
-        minutes = diff.total_seconds() / 60
+        # Get current time as Unix timestamp
+        now_timestamp = time.time()
+        
+        # Calculate difference in seconds
+        diff_seconds = now_timestamp - timestamp
+        
+        if diff_seconds < 0:
+            # Handle future timestamps (shouldn't happen but just in case)
+            return "Just posted"
+        
+        minutes = diff_seconds / 60
         if minutes < 60:
             return f"{int(minutes)} min ago"
         
@@ -759,6 +818,236 @@ class AutoBidder:
                 
         except Exception as e:
             logger.error(f"❌ Failed to save bid history: {e}")
+
+    async def _handle_bid_response(self, user_id: int, project: Dict, bid_amount: float, proposal: str, response: httpx.Response) -> str:
+        """Handle the response from bid submission"""
+        project_id = project.get("id")
+        title = project.get("title", "Unknown")
+        
+        logger.info(f"📨 Response: {response.status_code}")
+        
+        if response.status_code == 200 or response.status_code == 201:
+            try:
+                response_data = response.json()
+                if response_data.get("status") == "error":
+                    error_message = response_data.get("message", "Unknown error")
+                    logger.error(f"❌ User {user_id}: Freelancer returned error: {error_message}")
+                    
+                    # Check if it's "already bid" error - don't save to history
+                    if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
+                        logger.info(f"⏭️  User {user_id}: Already bid error detected, moving to next project...")
+                        return "ALREADY_BID"
+                    
+                    # Save other errors to history
+                    await self._save_bid_history({
+                        "user_id": user_id,
+                        "project_id": str(project_id),
+                        "project_title": title,
+                        "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
+                        "bid_amount": bid_amount,
+                        "proposal_text": proposal,
+                        "status": "failed",
+                        "error_message": error_message
+                    })
+                    return "ERROR"
+                
+                logger.info(f"✅ User {user_id}: BID PLACED SUCCESSFULLY!")
+                logger.info(f"   Bid ID: {response_data.get('result', {}).get('id', 'N/A')}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️  Could not parse response: {e}")
+            
+            # Save successful bid to history
+            await self._save_bid_history({
+                "user_id": user_id,
+                "project_id": str(project_id),
+                "project_title": title,
+                "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
+                "bid_amount": bid_amount,
+                "proposal_text": proposal,
+                "status": "success"
+            })
+            return "SUCCESS"
+        
+        else:
+            error_text = response.text
+            logger.error(f"❌ User {user_id}: Bid failed: {response.status_code}")
+            
+            # Handle 401 Unauthorized (expired credentials)
+            if response.status_code == 401:
+                logger.error(f"🔐 User {user_id}: Freelancer credentials EXPIRED (401) during bidding")
+                await self._mark_credentials_expired(user_id)
+                return "CREDENTIALS_EXPIRED"
+            
+            try:
+                error_data = response.json()
+                error_message = error_data.get('message') or error_data.get('error') or str(error_data)
+            except:
+                error_message = error_text or f"HTTP {response.status_code}"
+            
+            # Check for specific error types
+            if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
+                logger.info(f"⏭️  User {user_id}: Already bid error detected, moving to next project...")
+                return "ALREADY_BID"
+            
+            if "used all of your bids" in error_message.lower() or "you have used all your bids" in error_message.lower() or "daily limit" in error_message.lower():
+                logger.error(f"🚫 User {user_id}: Used all available bids or reached daily limit! Temporarily disabling auto-bidding...")
+                await self._disable_user_autobidding(user_id)
+                return "BID_LIMIT_REACHED"
+            
+            # Save other errors to history
+            await self._save_bid_history({
+                "user_id": user_id,
+                "project_id": str(project_id),
+                "project_title": title,
+                "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
+                "bid_amount": bid_amount,
+                "proposal_text": proposal,
+                "status": "failed",
+                "error_message": error_message
+            })
+            return "ERROR"
+
+    async def _mark_credentials_expired(self, user_id: int):
+        """Mark user credentials as expired in database"""
+        try:
+            from database import SessionLocal
+            from models import FreelancerCredentials
+            
+            db = SessionLocal()
+            try:
+                credentials = db.query(FreelancerCredentials).filter(
+                    FreelancerCredentials.user_id == user_id
+                ).first()
+                
+                if credentials:
+                    credentials.is_validated = False
+                    db.commit()
+                    logger.info(f"🔐 User {user_id}: Marked credentials as expired in database")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"❌ Failed to update credential status: {e}")
+
+    async def _disable_user_autobidding(self, user_id: int):
+        """Disable auto-bidding for user who hit bid limit"""
+        try:
+            from database import SessionLocal
+            from models import AutoBidSettings as DBAutoBidSettings
+            
+            db = SessionLocal()
+            try:
+                db_settings = db.query(DBAutoBidSettings).filter(
+                    DBAutoBidSettings.user_id == user_id
+                ).first()
+                
+                if db_settings:
+                    db_settings.enabled = False
+                    db.commit()
+                    logger.info(f"🚫 User {user_id}: Auto-bidding disabled due to bid limit reached")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"❌ Failed to disable auto-bidding: {e}")
+
+    async def _bid_on_project(self, user_id: int, project: Dict, settings: Dict):
+        """Place a REAL bid on Freelancer.com with AI-generated proposal"""
+        logger.info(f"\n💼 User {user_id}: BIDDING ON PROJECT")
+        
+        try:
+            title = project.get("title", "Unknown")
+            project_id = project.get("id")
+            
+            # Calculate bid amount FIRST
+            budget = project.get("budget", {})
+            min_budget = budget.get("minimum", 50)
+            max_budget = budget.get("maximum", min_budget)
+            
+            if settings.get("smart_bidding"):
+                bid_amount = (min_budget + max_budget) / 2
+            else:
+                bid_amount = min_budget
+
+            bid_amount = round(bid_amount, 2)
+            
+            logger.info(f"💰 User {user_id}: Calculated bid amount: ${bid_amount}")
+
+            # Step 1: Generate AI proposal
+            try:
+                proposal = await self._generate_proposal(user_id, project, bid_amount)
+            except Exception as e:
+                logger.info("⏭️  Skipping this project")
+                return False
+            
+            # Step 2: Get Freelancer credentials
+            from database import SessionLocal
+            from models import FreelancerCredentials
+            import json
+            
+            db = SessionLocal()
+            try:
+                credentials = db.query(FreelancerCredentials).filter(
+                    FreelancerCredentials.user_id == user_id
+                ).first()
+                
+                if not credentials:
+                    raise Exception("No credentials found")
+                
+                cookies_dict = {}
+                csrf_token = None
+                
+                if credentials.cookies:
+                    cookie_data = credentials.cookies if isinstance(credentials.cookies, dict) else json.loads(credentials.cookies)
+                    
+                    user_id_cookie = cookie_data.get('GETAFREE_USER_ID')
+                    auth_hash = cookie_data.get('GETAFREE_AUTH_HASH_V2')
+                    csrf_token = cookie_data.get('XSRF_TOKEN')
+                    session2 = cookie_data.get('session2')
+                    
+                    if not user_id_cookie or not auth_hash or not session2:
+                        raise Exception("Missing required cookies")
+                        
+                    cookies_dict = {
+                        "GETAFREE_USER_ID": user_id_cookie,
+                        "GETAFREE_AUTH_HASH_V2": auth_hash,
+                        "session2": session2
+                    }
+                    if cookie_data.get('qfence'):
+                         cookies_dict['qfence'] = cookie_data['qfence']
+                
+                # Step 3: Build headers and payload
+                headers = self._get_freelancer_headers(
+                    project, user_id_cookie, auth_hash, csrf_token, 
+                    credentials.access_token or ""
+                )
+                
+                bid_payload = self._build_bid_payload(
+                    user_id, project, bid_amount, proposal, user_id_cookie
+                )
+                
+                # Step 4: Submit bid
+                logger.info(f"📤 User {user_id}: Sending bid request...")
+                response = await self._submit_bid(headers, cookies_dict, bid_payload)
+                
+                # Step 5: Handle response
+                result = await self._handle_bid_response(user_id, project, bid_amount, proposal, response)
+                
+                # Return appropriate values based on result
+                if result == "SUCCESS":
+                    return True
+                elif result in ["CREDENTIALS_EXPIRED", "BID_LIMIT_REACHED"]:
+                    return result
+                else:
+                    return False
+                    
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"❌ ERROR BIDDING ON PROJECT for User {user_id}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
 
 # Singleton accessor
 bidder = AutoBidder()
