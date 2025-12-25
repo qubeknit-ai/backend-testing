@@ -15,16 +15,9 @@ class AutoBidder:
     _instance = None
     _is_running = False
     _task = None
-    _settings = {
-        "enabled": False,
-        "min_budget": 10,
-        "max_budget": 1000,
-        "frequency_minutes": 10,
-        "max_project_bids": 50,
-        "smart_bidding": True
-    }
+    _user_last_bid_time = {}  # Track last bid time per user
     
-    # We removed global _user_id and _processed_projects to support multi-user
+    # Removed global settings - now using per-user settings from database
 
     def __new__(cls):
         if cls._instance is None:
@@ -37,20 +30,17 @@ class AutoBidder:
         pass
 
     def update_settings(self, new_settings: Dict[str, Any]):
-        """Update settings and persist to database"""
-        # Just notify, the real settings are in DB
-        self._settings.update(new_settings)
-        logger.info(f"AutoBidder settings updated (Global): {self._settings}")
+        """Update settings - now handled per user in database"""
+        logger.info(f"AutoBidder settings update requested: {new_settings}")
+        # Settings are now stored per-user in database, not globally
         
-        # If enabled changed, start/stop logic might need check
-        if self._settings.get("enabled") and not self._is_running:
+        # Start service if any user enables it
+        if new_settings.get("enabled") and not self._is_running:
             self.start()
-        elif not self._settings.get("enabled") and self._is_running:
-            # Don't stop globally if just one user updated, but for now kept simple
-            pass
 
     def get_settings(self):
-        return self._settings
+        """Get settings - now returns empty as settings are per-user in database"""
+        return {}
 
     def start(self):
         if self._is_running:
@@ -102,11 +92,30 @@ class AutoBidder:
                                 "smart_bidding": db_setting.smart_bidding
                             }
                             
+                            # Check if enough time has passed since last bid for this user
+                            current_time = datetime.now()
+                            last_bid_time = self._user_last_bid_time.get(user_id)
+                            
+                            if last_bid_time:
+                                time_since_last_bid = (current_time - last_bid_time).total_seconds() / 60
+                                if time_since_last_bid < settings["frequency_minutes"]:
+                                    remaining_minutes = settings["frequency_minutes"] - time_since_last_bid
+                                    logger.info(f"⏰ User {user_id}: Skipping - {time_since_last_bid:.1f}m since last bid, need {settings['frequency_minutes']}m (wait {remaining_minutes:.1f}m more)")
+                                    continue
+                                else:
+                                    logger.info(f"✅ User {user_id}: Ready to bid - {time_since_last_bid:.1f}m since last bid (frequency: {settings['frequency_minutes']}m)")
+                            else:
+                                logger.info(f"🆕 User {user_id}: First bid attempt (frequency: {settings['frequency_minutes']}m)")
+                            
                             logger.info(f"🔄 Processing cycle for User ID: {user_id}")
                             active_users.append(user_id)
                             
                             # Run bid cycle for this SPECIFIC user
-                            await self._run_bid_cycle(user_id, settings)
+                            bid_placed = await self._run_bid_cycle(user_id, settings)
+                            
+                            # Update last bid time if bid was placed
+                            if bid_placed:
+                                self._user_last_bid_time[user_id] = current_time
                             
                             # Small delay between users to not hammer API
                             await asyncio.sleep(5)
@@ -114,9 +123,18 @@ class AutoBidder:
                 finally:
                     db.close()
                 
-                # Wait for next cycle
-                wait_seconds = 60  
-                logger.info(f"✅ Cycle complete for users {active_users}. Waiting {wait_seconds} seconds...")
+                # Smart wait time: Check frequently enough for the most active user
+                # but don't check too often to waste resources
+                if enabled_settings:
+                    min_frequency_minutes = min(setting.frequency_minutes for setting in enabled_settings)
+                    # Wait for 1/4 of the minimum frequency, but at least 30 seconds, max 5 minutes
+                    smart_wait_minutes = max(0.5, min(5, min_frequency_minutes / 4))
+                    wait_seconds = int(smart_wait_minutes * 60)
+                    logger.info(f"✅ Cycle complete for users {active_users}. Next check in {smart_wait_minutes} minutes ({wait_seconds}s) - min user frequency: {min_frequency_minutes}m")
+                else:
+                    wait_seconds = 300  # Default 5 minutes if no users
+                    logger.info(f"✅ No enabled users. Waiting {wait_seconds} seconds...")
+                
                 await asyncio.sleep(wait_seconds)
                 
             except asyncio.CancelledError:
@@ -134,7 +152,7 @@ class AutoBidder:
             projects = await self._fetch_projects(user_id)
             if not projects:
                 logger.info(f"📭 User {user_id}: No projects found")
-                return
+                return False
 
             logger.info(f"📥 User {user_id}: Found {len(projects)} total projects")
 
@@ -142,12 +160,15 @@ class AutoBidder:
             filtered_projects = self._filter_projects(projects, settings)
             if not filtered_projects:
                 logger.info(f"🔍 User {user_id}: No projects match criteria")
-                return
+                return False
 
             logger.info(f"✅ User {user_id}: {len(filtered_projects)} projects match criteria")
 
-            # 3. Sort by lowest competition
-            filtered_projects.sort(key=lambda p: p.get("bid_stats", {}).get("bid_count", 999))
+            # 3. Sort by NEWEST first (time_submitted), then by HIGHEST budget - FIXED!
+            filtered_projects.sort(key=lambda p: (
+                -(p.get("time_submitted", 0)),  # Negative for descending (newest first)
+                -(p.get("budget", {}).get("maximum", 0))  # Then by highest budget
+            ))
             
             # 4. Check database for already-bid projects
             from database import SessionLocal
@@ -163,8 +184,7 @@ class AutoBidder:
                 
                 logger.info(f"📋 User {user_id}: Already bid on {len(already_bid_set)} projects")
                 
-                # Find first project this user hasn't bid on yet
-                project_to_bid = None
+                # Try to bid on projects in order (best first) until one succeeds
                 for project in filtered_projects:
                     project_id = str(project.get("id"))
                     
@@ -172,25 +192,29 @@ class AutoBidder:
                         logger.debug(f"⏭️  Skipping {project.get('title')} - already bid")
                         continue
                     
-                    project_to_bid = project
-                    break
+                    logger.info(f"🎯 User {user_id}: Attempting bid on '{project.get('title')}'")
+                    
+                    try:
+                        bid_result = await self._bid_on_project(user_id, project, settings)
+                        if bid_result:
+                            logger.info(f"✅ User {user_id}: Successfully placed bid!")
+                            return True
+                        else:
+                            logger.info(f"❌ User {user_id}: Bid failed, trying next project...")
+                            continue
+                    except Exception as e:
+                        logger.error(f"Failed to bid on {project.get('title')} for User {user_id}: {e}")
+                        continue
                 
             finally:
                 db.close()
             
-            if not project_to_bid:
-                logger.info(f"ℹ️  User {user_id}: All matching projects have already been processed")
-                return
-            
-            # 5. Process the single best project for THIS user
-            logger.info(f"🎯 User {user_id}: Selected NEW project '{project_to_bid.get('title')}'")
-            try:
-                await self._bid_on_project(user_id, project_to_bid, settings)
-            except Exception as e:
-                logger.error(f"Failed to bid on {project_to_bid.get('title')} for User {user_id}: {e}")
+            logger.info(f"ℹ️  User {user_id}: No successful bids placed this cycle")
+            return False
 
         except Exception as e:
             logger.error(f"Error in bid cycle for User {user_id}: {e}")
+            return False
 
     async def _fetch_projects(self, user_id: int) -> List[Dict]:
         """Fetch projects from the Freelancer API using database credentials for SPECIFIC USER"""
@@ -253,12 +277,14 @@ class AutoBidder:
                         logger.warning(f"⚠️  User {user_id}: Could not get user profile: {user_response.status_code}")
                         logger.warning(f"⚠️  User {user_id}: Profile response: {user_response.text[:300]}...")
                     
-                    # Step 2: Build URL with user skills
+                    # Step 2: Build URL with user skills - FIXED to get LATEST projects
                     if user_skills:
                         skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
-                        url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&{skills_params}&languages[]=en"
+                        # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
+                        url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
                     else:
-                        url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&user_recommended=true"
+                        # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
+                        url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
                     
                     logger.info(f"🌐 User {user_id}: Using URL: {url[:100]}...")
                     
@@ -285,15 +311,25 @@ class AutoBidder:
                         
                         logger.info(f"✅ User {user_id}: Successfully fetched {len(projects)} projects")
                         
-                        # Log first project for debugging if available
+                        # Log first few projects with their posting times for debugging
                         if projects and len(projects) > 0:
                             first_project = projects[0]
                             logger.info(f"📝 User {user_id}: Sample project keys: {list(first_project.keys()) if isinstance(first_project, dict) else type(first_project)}")
+                            
+                            # Log posting times of first 3 projects to verify we're getting latest
+                            for i, project in enumerate(projects[:3]):
+                                time_submitted = project.get("time_submitted", 0)
+                                if time_submitted:
+                                    posted_time = self._format_time_ago(time_submitted)
+                                    logger.info(f"📅 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' posted {posted_time}")
+                                else:
+                                    logger.info(f"📅 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' - no timestamp")
                         
-                        # If no projects found with skills, try without skills filter
+                        # If no projects found with skills, try without skills filter - FIXED to get LATEST
                         if len(projects) == 0 and user_skills:
                             logger.info(f"🔄 User {user_id}: No projects with skills filter, trying general search...")
-                            fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true"
+                            # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
+                            fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc"
                             
                             fallback_response = await client.get(
                                 fallback_url,
@@ -539,6 +575,13 @@ class AutoBidder:
                             if response_data.get("status") == "error":
                                 error_message = response_data.get("message", "Unknown error")
                                 logger.error(f"❌ User {user_id}: Freelancer returned error: {error_message}")
+                                
+                                # Check if it's "already bid" error - don't save to history, just return False
+                                if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
+                                    logger.info(f"⏭️  User {user_id}: Already bid error detected, moving to next project...")
+                                    return False
+                                
+                                # For other errors, save to history
                                 await self._save_bid_history({
                                     "user_id": user_id,
                                     "project_id": str(project_id),
@@ -576,6 +619,11 @@ class AutoBidder:
                             error_message = error_data.get('message') or error_data.get('error') or str(error_data)
                         except:
                             error_message = error_text or f"HTTP {bid_response.status_code}"
+                        
+                        # Check if it's "already bid" error - don't save to history
+                        if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
+                            logger.info(f"⏭️  User {user_id}: Already bid error detected, moving to next project...")
+                            return False
                         
                         await self._save_bid_history({
                             "user_id": user_id,
