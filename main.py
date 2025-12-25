@@ -472,6 +472,16 @@ async def trigger_webhook_async(webhook_url: str, payload: dict, headers: dict):
     except Exception as e:
         return {"success": False, "error": str(e), "status_code": 500}
 
+@app.get("/api/autobid/heartbeat")
+async def autobid_heartbeat():
+    """Heartbeat endpoint to keep AutoBidder service alive"""
+    return {
+        "success": True,
+        "timestamp": datetime.now().isoformat(),
+        "is_running": autobidder._is_running,
+        "message": "AutoBidder service heartbeat"
+    }
+
 @app.get("/api/autobid/stats")
 async def get_autobid_stats(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     try:

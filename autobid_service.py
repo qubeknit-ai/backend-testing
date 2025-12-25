@@ -140,6 +140,9 @@ class AutoBidder:
                     wait_seconds = 300  # Default 5 minutes if no users
                     logger.info(f"✅ No enabled users. Waiting {wait_seconds} seconds...")
                 
+                # Add heartbeat log every cycle to prevent serverless timeout
+                logger.info(f"💓 AutoBidder heartbeat - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Service running normally")
+                
                 await asyncio.sleep(wait_seconds)
                 
             except asyncio.CancelledError:
