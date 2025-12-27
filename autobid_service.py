@@ -297,7 +297,7 @@ class AutoBidder:
                     
                     logger.info(f"🎯 User {user_id}: Attempting bid on project '{project_title}...' (ID: {project_id})")
                     logger.info(f"   � BPosted: {posted_time}")
-                    logger.info(f"   � Budget: {bjudget_str} ({project_currency})")
+                    logger.info(f"   💰 Budget: {budget_str} ({project_currency})")
                     logger.info(f"   👥 Bids: {project.get('bid_stats', {}).get('bid_count', 0)}")
                     
                     try:
