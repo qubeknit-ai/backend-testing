@@ -215,142 +215,84 @@ class AutoBidder:
             projects_to_process = projects
             logger.info(f"📥 User {user_id}: Processing all {len(projects_to_process)} projects (filtering by bid history)")
 
-            # 2. Filter projects by criteria for THIS user
+            # 2. Filter projects by criteria for THIS user (including freshness check)
             filtered_projects = self._filter_projects(projects_to_process, settings)
             if not filtered_projects:
-                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)})")
+                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, max age: 30 minutes)")
                 return False
 
-            logger.info(f"✅ User {user_id}: {len(filtered_projects)} projects match criteria (currencies: {settings.get('currencies', ['USD'])})")
+            logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, posted within 30 minutes)")
 
-            # 3. Sort by NEWEST first (time_submitted), then by HIGHEST budget
-            filtered_projects.sort(key=lambda p: (
-                -(p.get("time_submitted", 0)),  # Negative for descending (newest first)
-                -(p.get("budget", {}).get("maximum", 0))  # Then by highest budget
-            ))
+            # 3. Sort by NEWEST first ONLY - prioritize the freshest opportunities
+            filtered_projects.sort(key=lambda p: -(p.get("time_submitted", 0)))  # Only sort by newest first
             
-            # Log the sorting to verify we're getting newest projects first
+            # Log the sorting to verify we're prioritizing the absolute newest projects
             if filtered_projects:
-                logger.info(f"📅 User {user_id}: Projects sorted by newest first:")
-                for i, project in enumerate(filtered_projects[:3]):  # Show first 3
+                logger.info(f"📅 User {user_id}: Projects sorted by NEWEST first (freshest opportunities):")
+                for i, project in enumerate(filtered_projects[:5]):  # Show first 5
                     time_submitted = project.get("time_submitted", 0)
                     posted_time = self._format_time_ago(time_submitted) if time_submitted else "Unknown time"
-                    logger.info(f"   {i+1}. '{project.get('title', 'Unknown')[:40]}...' posted {posted_time}")
+                    import time
+                    current_timestamp = time.time()
+                    age_minutes = (current_timestamp - time_submitted) / 60 if time_submitted else 999
+                    logger.info(f"   {i+1}. '{project.get('title', 'Unknown')[:40]}...' posted {posted_time} ({age_minutes:.1f}m ago)")
             
-            # 4. Check database for already-bid projects
-            from database import SessionLocal
-            from models import BidHistory
-            
-            db = SessionLocal()
-            try:
-                # Get all project IDs THIS user has already bid on
-                already_bid_ids = db.query(BidHistory.project_id).filter(
-                    BidHistory.user_id == user_id
-                ).all()
-                already_bid_set = set(str(row.project_id) for row in already_bid_ids)
+            # 4. Try to bid on projects in order (newest first) until one succeeds
+            # Removed historical bid filtering - let it bid on fresh projects
+            for project in filtered_projects:
+                project_id = str(project.get("id"))
+                project_title = project.get("title", "Unknown")[:50]
                 
-                logger.info(f"📋 User {user_id}: Already bid on {len(already_bid_set)} projects")
+                # Log project details before attempting bid
+                time_submitted = project.get("time_submitted", 0)
+                posted_time = self._format_time_ago(time_submitted) if time_submitted else "Unknown time"
+                budget = project.get("budget", {})
+                budget_str = f"${budget.get('minimum', 0)}-${budget.get('maximum', 0)}"
+                project_currency = self._get_project_currency(project)
                 
-                # DEBUG: Log the actual bid history for this user (recent bids only)
-                if len(already_bid_set) > 0:
-                    bid_history_records = db.query(BidHistory).filter(
-                        BidHistory.user_id == user_id
-                    ).order_by(BidHistory.created_at.desc()).limit(5).all()
-                    
-                    logger.info(f"🔍 User {user_id}: Recent bid history (last 5):")
-                    for i, record in enumerate(bid_history_records):
-                        logger.info(f"   {i+1}. Project {record.project_id} - Status: {record.status} - Title: {record.project_title[:50]}...")
+                # Debug: Log timestamp details
+                if time_submitted:
+                    import time
+                    current_timestamp = time.time()
+                    age_minutes = (current_timestamp - time_submitted) / 60
+                    logger.info(f"🕐 Fresh project - Current: {current_timestamp}, Project: {time_submitted}, Age: {age_minutes:.1f} minutes")
                 
-                # Only count SUCCESSFUL bids, not failed attempts
-                successful_bid_ids = db.query(BidHistory.project_id).filter(
-                    BidHistory.user_id == user_id,
-                    BidHistory.status == "success"
-                ).all()
-                successful_bid_set = set(str(row.project_id) for row in successful_bid_ids)
+                logger.info(f"🎯 User {user_id}: Attempting bid on FRESH project '{project_title}...' (ID: {project_id})")
+                logger.info(f"   📅 Posted: {posted_time}")
+                logger.info(f"   💰 Budget: {budget_str} ({project_currency})")
+                logger.info(f"   👥 Bids: {project.get('bid_stats', {}).get('bid_count', 0)}")
                 
-                logger.info(f"✅ User {user_id}: Successfully bid on {len(successful_bid_set)} projects (excluding failed attempts)")
-                
-                # Use successful bids for filtering, not all attempts
-                already_bid_set = successful_bid_set
-                
-                # Try to bid on projects in order (best first) until one succeeds
-                for project in filtered_projects:
-                    project_id = str(project.get("id"))
-                    project_title = project.get("title", "Unknown")[:50]
-                    
-                    if project_id in already_bid_set:
-                        logger.debug(f"⏭️  User {user_id}: Skipping '{project_title}...' (Project ID: {project_id}) - already successfully bid")
+                try:
+                    bid_result = await self._bid_on_project(user_id, project, settings)
+                    if bid_result == True:
+                        logger.info(f"✅ User {user_id}: Successfully placed bid on fresh project!")
+                        
+                        # Check if we've now reached the daily limit after this successful bid
+                        if not await self._check_daily_bid_limit(user_id, settings):
+                            logger.info(f"🚫 User {user_id}: Daily bid limit reached after successful bid - stopping cycle")
+                            return True  # Return True because we did place a bid successfully
+                        
+                        return True
+                    elif bid_result == "BID_LIMIT_REACHED":
+                        logger.error(f"🚫 User {user_id}: Bid limit reached - stopping bid cycle for this user")
+                        return False  # Stop the entire cycle for this user
+                    elif bid_result == "CREDENTIALS_EXPIRED":
+                        logger.error(f"🔐 User {user_id}: Credentials expired - stopping bid cycle for this user")
+                        return False  # Stop the entire cycle for this user
+                    else:
+                        logger.info(f"❌ User {user_id}: Bid failed on fresh project, trying next...")
                         continue
-                    
-                    # Log project details before attempting bid
-                    time_submitted = project.get("time_submitted", 0)
-                    posted_time = self._format_time_ago(time_submitted) if time_submitted else "Unknown time"
-                    budget = project.get("budget", {})
-                    budget_str = f"${budget.get('minimum', 0)}-${budget.get('maximum', 0)}"
-                    project_currency = self._get_project_currency(project)
-                    
-                    # Debug: Log timestamp details
-                    if time_submitted:
-                        import time
-                        current_timestamp = time.time()
-                        logger.info(f"🕐 Debug timestamps - Current: {current_timestamp}, Project: {time_submitted}, Diff: {current_timestamp - time_submitted} seconds")
-                    
-                    logger.info(f"🎯 User {user_id}: Attempting bid on project '{project_title}...' (ID: {project_id})")
-                    logger.info(f"   � BPosted: {posted_time}")
-                    logger.info(f"   💰 Budget: {budget_str} ({project_currency})")
-                    logger.info(f"   👥 Bids: {project.get('bid_stats', {}).get('bid_count', 0)}")
-                    
-                    try:
-                        bid_result = await self._bid_on_project(user_id, project, settings)
-                        if bid_result == True:
-                            logger.info(f"✅ User {user_id}: Successfully placed bid!")
-                            
-                            # Check if we've now reached the daily limit after this successful bid
-                            if not await self._check_daily_bid_limit(user_id, settings):
-                                logger.info(f"🚫 User {user_id}: Daily bid limit reached after successful bid - stopping cycle")
-                                return True  # Return True because we did place a bid successfully
-                            
-                            return True
-                        elif bid_result == "BID_LIMIT_REACHED":
-                            logger.error(f"🚫 User {user_id}: Bid limit reached - stopping bid cycle for this user")
-                            return False  # Stop the entire cycle for this user
-                        elif bid_result == "CREDENTIALS_EXPIRED":
-                            logger.error(f"🔐 User {user_id}: Credentials expired - stopping bid cycle for this user")
-                            return False  # Stop the entire cycle for this user
-                        else:
-                            logger.info(f"❌ User {user_id}: Bid failed, trying next project...")
-                            continue
-                    except Exception as e:
-                        logger.error(f"Failed to bid on {project.get('title')} for User {user_id}: {e}")
-                        continue
-                
-            finally:
-                db.close()
+                except Exception as e:
+                    logger.error(f"Failed to bid on fresh project {project.get('title')} for User {user_id}: {e}")
+                    continue
             
             logger.info(f"ℹ️  User {user_id}: No successful bids placed this cycle")
             
-            # Detailed summary of why no bids were placed
+            # Simplified summary - focus on fresh opportunities
             logger.info(f"📊 User {user_id}: CYCLE SUMMARY:")
             logger.info(f"   📥 Total projects fetched: {len(projects)}")
-            logger.info(f"   ✅ Projects matching criteria: {len(filtered_projects)}")
-            logger.info(f"   🚫 Already successfully bid on: {len(already_bid_set)}")
-            
-            # Show which projects were available but not bid on
-            available_projects = [p for p in filtered_projects if str(p.get('id')) not in already_bid_set]
-            logger.info(f"   🎯 Available to bid on: {len(available_projects)}")
-            
-            if available_projects:
-                logger.info(f"   📋 Available projects not bid on:")
-                for i, project in enumerate(available_projects[:5]):  # Show first 5
-                    logger.info(f"      {i+1}. '{project.get('title', 'Unknown')[:40]}...' (ID: {project.get('id')})")
-                if len(available_projects) > 5:
-                    logger.info(f"      ... and {len(available_projects) - 5} more")
-            
-            # Log why no bids were placed
-            if len(available_projects) == 0:
-                logger.info(f"💡 User {user_id}: All matching projects have already been successfully bid on - no new opportunities")
-            else:
-                logger.info(f"💡 User {user_id}: {len(available_projects)} unbid projects available but bidding failed - check credentials or bid limits")
+            logger.info(f"   ⚡ Fresh projects (≤30min): {len(filtered_projects)}")
+            logger.info(f"   💡 Reason: All fresh projects failed to bid - check credentials or try again next cycle")
             
             return False
 
@@ -424,13 +366,13 @@ class AutoBidder:
                     for limit in [50, 100, 150]:  # Try increasing limits
                         logger.info(f"🔍 User {user_id}: Trying to fetch {limit} projects...")
                         
-                        # Build URL with user skills - FIXED to get LATEST projects
+                        # Build URL with user skills - ALWAYS sort by NEWEST first for fresh opportunities
                         if user_skills:
                             skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
-                            # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
+                            # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
                             url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit={limit}&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
                         else:
-                            # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
+                            # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
                             url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit={limit}&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
                         
                         logger.info(f"🌐 User {user_id}: Using URL: {url[:100]}...")
@@ -480,19 +422,21 @@ class AutoBidder:
                         first_project = projects[0]
                         logger.info(f"📝 User {user_id}: Sample project keys: {list(first_project.keys()) if isinstance(first_project, dict) else type(first_project)}")
                         
-                        # Log posting times of first 3 projects to verify we're getting latest
-                        for i, project in enumerate(projects[:3]):
+                        # Log posting times of first 5 projects to verify we're getting latest
+                        for i, project in enumerate(projects[:5]):
                             time_submitted = project.get("time_submitted", 0)
                             if time_submitted:
                                 posted_time = self._format_time_ago(time_submitted)
-                                logger.info(f"� Use r {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' posted {posted_time}")
+                                project_currency = self._get_project_currency(project)
+                                bid_count = project.get("bid_stats", {}).get("bid_count", 0)
+                                logger.info(f"📋 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' posted {posted_time} - Currency: {project_currency} - Bids: {bid_count}")
                             else:
-                                logger.info(f"� User {uuser_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' - no timestamp")
+                                logger.info(f"📋 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' - no timestamp")
                     
-                    # If no projects found with skills, try without skills filter - FIXED to get LATEST
+                    # If no projects found with skills, try without skills filter - ALWAYS get NEWEST first
                     if len(projects) == 0 and user_skills:
                         logger.info(f"🔄 User {user_id}: No projects with skills filter, trying general search...")
-                        # Added sort_field=time_submitted&sort_order=desc to get NEWEST projects first
+                        # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
                         fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=100&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc"
                         
                         fallback_response = await client.get(
@@ -607,27 +551,53 @@ class AutoBidder:
         return "USD"
 
     def _filter_projects(self, projects: List[Dict], settings: Dict) -> List[Dict]:
-        """Filter projects based on settings"""
+        """Filter projects based on settings - focus on currency and freshness only"""
         
         max_bids = settings.get("max_project_bids", 50)
         supported_currencies = settings.get("currencies", ["USD"])
+        max_age_minutes = 30  # Only bid on projects posted within last 30 minutes for freshness
         
         filtered = []
+        import time
+        current_timestamp = time.time()
+
+        logger.info(f"🔍 Starting filter process - Max bids: {max_bids}, Currencies: {supported_currencies}, Max age: {max_age_minutes}m")
 
         for project in projects:
-            # Only check bid count - removed budget filtering
-            bid_count = project.get("bid_stats", {}).get("bid_count", 0)
-            if bid_count > max_bids:
-                continue
-
-            # Check if project currency is in user's supported currencies
+            project_id = project.get("id")
+            project_title = project.get("title", "Unknown")[:40]
+            
+            # 1. Check if project currency is in user's supported currencies FIRST
             project_currency = self._get_project_currency(project)
             if project_currency not in supported_currencies:
-                logger.debug(f"Skipping project {project.get('id')} - currency {project_currency} not in supported currencies {supported_currencies}")
+                logger.debug(f"❌ Project {project_id} '{project_title}...' - CURRENCY MISMATCH: {project_currency} not in {supported_currencies}")
                 continue
 
+            # 2. Check project age - only bid on FRESH projects (within last 30 minutes)
+            time_submitted = project.get("time_submitted", 0)
+            if time_submitted > 0:
+                age_minutes = (current_timestamp - time_submitted) / 60
+                if age_minutes > max_age_minutes:
+                    posted_time = self._format_time_ago(time_submitted)
+                    logger.debug(f"❌ Project {project_id} '{project_title}...' - TOO OLD: {posted_time} ({age_minutes:.1f}m > {max_age_minutes}m)")
+                    continue
+                else:
+                    posted_time = self._format_time_ago(time_submitted)
+                    logger.info(f"✅ Project {project_id} '{project_title}...' - FRESH: {posted_time} ({age_minutes:.1f}m ago) - Currency: {project_currency}")
+            else:
+                logger.debug(f"❌ Project {project_id} '{project_title}...' - NO TIMESTAMP")
+                continue
+
+            # 3. Check bid count LAST (less important than freshness and currency)
+            bid_count = project.get("bid_stats", {}).get("bid_count", 0)
+            if bid_count > max_bids:
+                logger.debug(f"❌ Project {project_id} '{project_title}...' - TOO MANY BIDS: {bid_count} > {max_bids}")
+                continue
+
+            logger.info(f"🎯 Project {project_id} '{project_title}...' - PASSED ALL FILTERS - Adding to bid list")
             filtered.append(project)
         
+        logger.info(f"🔍 Filter complete: {len(filtered)} projects passed all filters out of {len(projects)} total")
         return filtered
 
     async def _generate_proposal(self, user_id: int, project: Dict, bid_amount: float) -> str:
