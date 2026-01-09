@@ -254,10 +254,10 @@ class AutoBidder:
             # 2. Filter projects by criteria for THIS user (including freshness check)
             filtered_projects = self._filter_projects(projects_to_process, settings)
             if not filtered_projects:
-                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, max age: 30 minutes)")
+                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, max age: 10 minutes)")
                 return False
 
-            logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, posted within 30 minutes)")
+            logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, posted within 10 minutes)")
 
             # 3. Sort by NEWEST first ONLY - prioritize the freshest opportunities
             filtered_projects.sort(key=lambda p: -(p.get("time_submitted", 0)))  # Only sort by newest first
@@ -327,7 +327,7 @@ class AutoBidder:
             # Simplified summary - focus on fresh opportunities
             logger.info(f"📊 User {user_id}: CYCLE SUMMARY:")
             logger.info(f"   📥 Total projects fetched: {len(projects)}")
-            logger.info(f"   ⚡ Fresh projects (≤30min): {len(filtered_projects)}")
+            logger.info(f"   ⚡ Fresh projects (≤10min): {len(filtered_projects)}")
             logger.info(f"   💡 Reason: All fresh projects failed to bid - check credentials or try again next cycle")
             
             return False
@@ -591,7 +591,7 @@ class AutoBidder:
         
         max_bids = settings.get("max_project_bids", 50)
         supported_currencies = settings.get("currencies", ["USD"])
-        max_age_minutes = 30  # Only bid on projects posted within last 30 minutes for freshness
+        max_age_minutes = 10  # Only bid on projects posted within last 10 minutes for freshness
         
         filtered = []
         import time
