@@ -450,10 +450,12 @@ class AutoBidder:
                         if user_skills:
                             skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
                             # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
-                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit={limit}&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
+                            # Add full_description=true to get more project details including skills
+                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit={limit}&user_details=true&jobs=true&full_description=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
                         else:
                             # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
-                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit={limit}&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
+                            # Add full_description=true to get more project details including skills
+                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit={limit}&user_details=true&jobs=true&full_description=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
                         
                         logger.info(f"🌐 User {user_id}: Using URL: {url[:100]}...")
                         
@@ -502,6 +504,28 @@ class AutoBidder:
                         first_project = projects[0]
                         logger.info(f"📝 User {user_id}: Sample project keys: {list(first_project.keys()) if isinstance(first_project, dict) else type(first_project)}")
                         
+                        # Log detailed structure of first project to find skills/tags
+                        logger.info(f"🔍 User {user_id}: First project detailed structure:")
+                        for key, value in first_project.items():
+                            if isinstance(value, (list, dict)):
+                                if len(str(value)) < 500:  # Show full content for smaller objects
+                                    logger.info(f"   {key}: {value}")
+                                else:
+                                    logger.info(f"   {key}: {type(value)} (length: {len(value) if isinstance(value, (list, dict)) else len(str(value))})")
+                            else:
+                                logger.info(f"   {key}: {value}")
+                        
+                        # Also check if there are nested objects that might contain skills
+                        if 'owner' in first_project and isinstance(first_project['owner'], dict):
+                            logger.info(f"🔍 User {user_id}: Project owner structure:")
+                            for key, value in first_project['owner'].items():
+                                logger.info(f"   owner.{key}: {value}")
+                        
+                        if 'budget' in first_project and isinstance(first_project['budget'], dict):
+                            logger.info(f"🔍 User {user_id}: Project budget structure:")
+                            for key, value in first_project['budget'].items():
+                                logger.info(f"   budget.{key}: {value}")
+                        
                         # Log posting times of first 5 projects to verify we're getting latest
                         for i, project in enumerate(projects[:5]):
                             time_submitted = project.get("time_submitted", 0)
@@ -517,7 +541,8 @@ class AutoBidder:
                     if len(projects) == 0 and user_skills:
                         logger.info(f"🔄 User {user_id}: No projects with skills filter, trying general search...")
                         # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
-                        fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=100&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc"
+                        # Add full_description=true to get more project details including skills
+                        fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit=100&user_details=true&jobs=true&full_description=true&sort_field=time_submitted&sort_order=desc"
                         
                         fallback_response = await client.get(
                             fallback_url,
@@ -645,6 +670,8 @@ class AutoBidder:
         logger.info(f"🔍 Starting filter process - Max bids: {max_bids}, Currencies: {supported_currencies}, Min skill match: {min_skill_match}, Max age: {max_age_minutes}m")
         if user_selected_skills:
             logger.info(f"🎯 User selected skills for matching: {user_selected_skills}")
+        else:
+            logger.info(f"ℹ️  No user selected skills - skill matching will be skipped")
 
         for project in projects:
             project_id = project.get("id")
@@ -674,22 +701,112 @@ class AutoBidder:
             # 3. Check skill matching if user has selected skills
             if user_selected_skills and min_skill_match > 0:
                 project_skills = []
+                
+                # Try multiple ways to extract skills from project data
+                # Method 1: Standard jobs field
                 if project.get("jobs"):
-                    project_skills = [job.get("name") for job in project["jobs"] if job.get("name")]
+                    project_skills.extend([job.get("name") for job in project["jobs"] if job.get("name")])
                 
-                # Count matching skills
-                matching_skills = []
-                for skill in user_selected_skills:
-                    if skill in project_skills:
-                        matching_skills.append(skill)
+                # Method 2: Direct skills field
+                if project.get("skills"):
+                    if isinstance(project["skills"], list):
+                        project_skills.extend([skill.get("name") if isinstance(skill, dict) else str(skill) for skill in project["skills"]])
                 
-                skill_match_count = len(matching_skills)
+                # Method 3: Tags field
+                if project.get("tags"):
+                    if isinstance(project["tags"], list):
+                        project_skills.extend([tag.get("name") if isinstance(tag, dict) else str(tag) for tag in project["tags"]])
                 
-                if skill_match_count < min_skill_match:
-                    logger.debug(f"❌ Project {project_id} '{project_title}...' - SKILL MISMATCH: {skill_match_count}/{min_skill_match} skills match. Project skills: {project_skills[:3]}...")
-                    continue
+                # Method 4: Categories field
+                if project.get("categories"):
+                    if isinstance(project["categories"], list):
+                        project_skills.extend([cat.get("name") if isinstance(cat, dict) else str(cat) for cat in project["categories"]])
+                
+                # Method 5: Job categories field
+                if project.get("job_categories"):
+                    if isinstance(project["job_categories"], list):
+                        project_skills.extend([cat.get("name") if isinstance(cat, dict) else str(cat) for cat in project["job_categories"]])
+                
+                # Method 6: Check for other possible skill fields
+                for field_name in ['job_skills', 'project_skills', 'required_skills', 'skill_tags', 'job_tags']:
+                    if project.get(field_name):
+                        if isinstance(project[field_name], list):
+                            project_skills.extend([item.get("name") if isinstance(item, dict) else str(item) for item in project[field_name]])
+                
+                # Method 7: Try to extract from description or title (as last resort)
+                # Common skill keywords that might appear in project descriptions
+                common_skills = [
+                    'PHP', 'JavaScript', 'Python', 'Java', 'C++', 'HTML', 'CSS', 'React', 'Angular', 'Vue',
+                    'Node.js', 'Laravel', 'WordPress', 'Shopify', 'Android', 'iOS', 'Flutter', 'React Native',
+                    'Data Entry', 'Excel', 'Graphic Design', 'Logo Design', 'Photoshop', 'Illustrator',
+                    'SEO', 'Digital Marketing', 'Content Writing', 'Copywriting', 'Translation',
+                    'MySQL', 'PostgreSQL', 'MongoDB', 'AWS', 'Azure', 'Docker', 'Kubernetes'
+                ]
+                
+                description = project.get("description", "") + " " + project.get("preview_description", "") + " " + project.get("title", "")
+                description_lower = description.lower()
+                
+                for skill in common_skills:
+                    if skill.lower() in description_lower:
+                        project_skills.append(f"{skill} (from description)")
+                
+                # Remove duplicates and None values
+                project_skills = list(set([skill for skill in project_skills if skill]))
+                
+                # Enhanced logging for debugging
+                logger.info(f"🔍 Project {project_id} '{project_title}...' - SKILL DEBUG:")
+                logger.info(f"   User selected skills: {user_selected_skills}")
+                logger.info(f"   Project skills (extracted): {project_skills}")
+                logger.info(f"   Raw jobs field: {project.get('jobs', 'NOT_FOUND')}")
+                logger.info(f"   Raw skills field: {project.get('skills', 'NOT_FOUND')}")
+                logger.info(f"   Raw tags field: {project.get('tags', 'NOT_FOUND')}")
+                logger.info(f"   Raw categories field: {project.get('categories', 'NOT_FOUND')}")
+                logger.info(f"   Description snippet: {(project.get('description', '') + ' ' + project.get('preview_description', ''))[:100]}...")
+                
+                # Log all available fields for debugging
+                logger.info(f"   Available project fields: {list(project.keys())}")
+                
+                # If project has no skills data, skip skill matching (allow the project)
+                if not project_skills:
+                    logger.info(f"⚠️  Project {project_id} '{project_title}...' - NO SKILLS DATA - Allowing project (API may not return skills)")
                 else:
-                    logger.info(f"🎯 Project {project_id} '{project_title}...' - SKILL MATCH: {skill_match_count}/{min_skill_match} skills match: {matching_skills}")
+                    # Count matching skills with flexible matching
+                    matching_skills = []
+                    user_skills_lower = [skill.lower().strip() for skill in user_selected_skills]
+                    project_skills_lower = [skill.lower().strip() for skill in project_skills]
+                    
+                    # Exact match first
+                    for i, skill in enumerate(user_selected_skills):
+                        if skill in project_skills:
+                            matching_skills.append(skill)
+                    
+                    # If no exact matches, try case-insensitive matching
+                    if not matching_skills:
+                        for i, user_skill in enumerate(user_skills_lower):
+                            for j, project_skill in enumerate(project_skills_lower):
+                                if user_skill == project_skill:
+                                    matching_skills.append(user_selected_skills[i])
+                                    break
+                    
+                    # If still no matches, try partial matching (contains)
+                    if not matching_skills:
+                        for i, user_skill in enumerate(user_skills_lower):
+                            for j, project_skill in enumerate(project_skills_lower):
+                                if user_skill in project_skill or project_skill in user_skill:
+                                    matching_skills.append(f"{user_selected_skills[i]} (partial: {project_skills[j]})")
+                                    break
+                    
+                    skill_match_count = len(matching_skills)
+                    logger.info(f"   Matching skills: {matching_skills}")
+                    logger.info(f"   Match count: {skill_match_count}/{min_skill_match}")
+                    
+                    if skill_match_count < min_skill_match:
+                        logger.info(f"❌ Project {project_id} '{project_title}...' - SKILL MISMATCH: {skill_match_count}/{min_skill_match} skills match")
+                        continue
+                    else:
+                        logger.info(f"🎯 Project {project_id} '{project_title}...' - SKILL MATCH: {skill_match_count}/{min_skill_match} skills match: {matching_skills}")
+            else:
+                logger.info(f"⏭️  Project {project_id} '{project_title}...' - SKILL CHECK SKIPPED (no selected skills or min_skill_match=0)")
 
             # 4. Check bid count LAST (less important than freshness, currency, and skills)
             bid_count = project.get("bid_stats", {}).get("bid_count", 0)
