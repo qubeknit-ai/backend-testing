@@ -173,6 +173,9 @@ class FreelancerCredentials(Base):
     validated_username = Column(String, nullable=True)  # Freelancer username
     validated_email = Column(String, nullable=True)  # Freelancer email
     
+    # Skills preferences (stored as JSON array)
+    selected_skills = Column(JSON, default=list)  # List of selected skill names for filtering projects
+    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -210,6 +213,8 @@ class AutoBidSettings(Base):
     frequency_minutes = Column(Integer, default=10)
     max_project_bids = Column(Integer, default=50)  # Max existing bids on project
     smart_bidding = Column(Boolean, default=True)  # Use average of min/max
+    min_skill_match = Column(Integer, default=1)  # Minimum number of skills that must match
+    proposal_type = Column(Integer, default=1)  # Proposal type: 1, 2, or 3
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

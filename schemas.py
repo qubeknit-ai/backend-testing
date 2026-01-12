@@ -120,6 +120,7 @@ class FreelancerCredentialsCreate(BaseModel):
     cookies: Optional[Dict[str, Any]] = None
     validated_username: Optional[str] = None
     validated_email: Optional[str] = None
+    selected_skills: Optional[List[str]] = []
 
 class FreelancerCredentialsResponse(BaseModel):
     id: int
@@ -132,6 +133,7 @@ class FreelancerCredentialsResponse(BaseModel):
     is_validated: bool = False
     validated_username: Optional[str] = None
     validated_email: Optional[str] = None
+    selected_skills: List[str] = []
     created_at: datetime
     updated_at: datetime
     last_validated: Optional[datetime] = None
@@ -148,6 +150,7 @@ class FreelancerCredentialsUpdate(BaseModel):
     is_validated: Optional[bool] = None
     validated_username: Optional[str] = None
     validated_email: Optional[str] = None
+    selected_skills: Optional[List[str]] = None
 
 class AutoBidSettings(BaseModel):
     enabled: Optional[bool] = None
@@ -156,3 +159,5 @@ class AutoBidSettings(BaseModel):
     frequency_minutes: Optional[int] = None
     max_project_bids: Optional[int] = None
     smart_bidding: Optional[bool] = None
+    min_skill_match: Optional[int] = None
+    proposal_type: Optional[int] = None

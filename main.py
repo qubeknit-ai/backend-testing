@@ -65,7 +65,9 @@ async def startup_event():
                     "currencies": db_settings.currencies,
                     "frequency_minutes": db_settings.frequency_minutes,
                     "max_project_bids": db_settings.max_project_bids,
-                    "smart_bidding": db_settings.smart_bidding
+                    "smart_bidding": db_settings.smart_bidding,
+                    "min_skill_match": getattr(db_settings, 'min_skill_match', 1),
+                    "proposal_type": getattr(db_settings, 'proposal_type', 1)
                 }
                 autobidder.update_settings(settings_dict)
                 
@@ -2457,7 +2459,9 @@ async def get_autobid_settings(email: str = Depends(verify_token), db: Session =
         "currencies": db_settings.currencies,
         "frequency_minutes": db_settings.frequency_minutes,
         "max_project_bids": db_settings.max_project_bids,
-        "smart_bidding": db_settings.smart_bidding
+        "smart_bidding": db_settings.smart_bidding,
+        "min_skill_match": getattr(db_settings, 'min_skill_match', 1),
+        "proposal_type": getattr(db_settings, 'proposal_type', 1)
     }
 
 @app.post("/api/autobid/settings")
@@ -2489,6 +2493,10 @@ async def update_autobid_settings(
         db_settings.max_project_bids = settings.max_project_bids
     if settings.smart_bidding is not None:
         db_settings.smart_bidding = settings.smart_bidding
+    if settings.min_skill_match is not None:
+        db_settings.min_skill_match = settings.min_skill_match
+    if settings.proposal_type is not None:
+        db_settings.proposal_type = settings.proposal_type
     
     db.commit()
     db.refresh(db_settings)
@@ -2500,7 +2508,9 @@ async def update_autobid_settings(
         "currencies": db_settings.currencies,
         "frequency_minutes": db_settings.frequency_minutes,
         "max_project_bids": db_settings.max_project_bids,
-        "smart_bidding": db_settings.smart_bidding
+        "smart_bidding": db_settings.smart_bidding,
+        "min_skill_match": db_settings.min_skill_match,
+        "proposal_type": db_settings.proposal_type
     }
     autobidder.update_settings(settings_dict)
     
@@ -3899,12 +3909,28 @@ async def get_freelancer_projects(
                     user_profile = user_data.get("result", {})
                     user_validated = True
                     
-                    # Extract skill IDs from user profile
-                    if user_profile.get("jobs") and len(user_profile["jobs"]) > 0:
+                    # Get selected skills from database instead of user profile
+                    selected_skill_names = credentials.selected_skills or []
+                    print(f"🎯 User selected skills from database: {selected_skill_names}")
+                    
+                    # If user has selected skills, find their IDs from the profile
+                    if selected_skill_names and user_profile.get("jobs"):
+                        profile_jobs = user_profile["jobs"]
+                        # Match selected skill names with profile job IDs
+                        for job in profile_jobs:
+                            if job.get("name") in selected_skill_names:
+                                user_skills.append(job["id"])
+                        
+                        print(f"✓ Matched skill IDs from profile: {user_skills}")
+                        
+                        # If no matches found in profile, we'll use all profile skills as fallback
+                        if not user_skills and profile_jobs:
+                            print("⚠️ No selected skills matched profile, using all profile skills as fallback")
+                            user_skills = [job["id"] for job in profile_jobs]
+                    elif user_profile.get("jobs"):
+                        # No skills selected, use all profile skills
                         user_skills = [job["id"] for job in user_profile["jobs"]]
-                        skill_names = [job["name"] for job in user_profile["jobs"]]
-                        print(f"✓ Found user skills: {user_skills}")
-                        print(f"✓ Skill names: {skill_names}")
+                        print(f"✓ Using all profile skills (no selection): {user_skills}")
                     else:
                         print("ℹ️ No skills found in user profile")
                 elif user_response.status_code == 401:
@@ -4647,6 +4673,213 @@ async def update_freelancer_settings(
     except Exception as e:
         print(f"Error updating freelancer settings: {e}")
         raise HTTPException(status_code=500, detail="Failed to update settings")
+
+@app.get("/api/freelancer/skills")
+async def get_freelancer_skills(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get user's selected freelancer skills"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import User, FreelancerCredentials
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        credentials = db.query(FreelancerCredentials).filter(FreelancerCredentials.user_id == user.id).first()
+        
+        if not credentials:
+            return {"selected_skills": []}
+        
+        return {"selected_skills": credentials.selected_skills or []}
+        
+    except Exception as e:
+        print(f"Error getting freelancer skills: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get skills")
+
+@app.put("/api/freelancer/skills")
+async def update_freelancer_skills(
+    skills_data: dict,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Update user's selected freelancer skills"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import User, FreelancerCredentials
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        credentials = db.query(FreelancerCredentials).filter(FreelancerCredentials.user_id == user.id).first()
+        
+        if not credentials:
+            # Create new credentials record if it doesn't exist
+            credentials = FreelancerCredentials(
+                user_id=user.id,
+                selected_skills=skills_data.get("selected_skills", [])
+            )
+            db.add(credentials)
+        else:
+            # Update existing credentials
+            credentials.selected_skills = skills_data.get("selected_skills", [])
+            credentials.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "success": True, 
+            "message": "Skills updated successfully",
+            "selected_skills": credentials.selected_skills
+        }
+        
+    except Exception as e:
+        print(f"Error updating freelancer skills: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update skills")
+
+@app.get("/api/freelancer/available-skills")
+async def get_available_freelancer_skills(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get list of available skills from user's Freelancer profile"""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        from models import User, FreelancerCredentials
+        import json
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        credentials = db.query(FreelancerCredentials).filter(FreelancerCredentials.user_id == user.id).first()
+        
+        if not credentials or not credentials.is_validated:
+            # Return common freelancer skills as fallback
+            common_skills = [
+                "PHP", "JavaScript", "HTML", "CSS", "WordPress", "Python", "React", "Node.js",
+                "MySQL", "Laravel", "Vue.js", "Angular", "Bootstrap", "jQuery", "AJAX",
+                "Web Development", "Mobile App Development", "Android", "iOS", "Flutter",
+                "Graphic Design", "Logo Design", "Photoshop", "Illustrator", "UI/UX Design",
+                "Content Writing", "Copywriting", "SEO", "Digital Marketing", "Social Media Marketing",
+                "Data Entry", "Excel", "Virtual Assistant", "Customer Service", "Translation",
+                "Video Editing", "Animation", "3D Modeling", "Game Development", "Unity",
+                "Machine Learning", "Data Science", "Artificial Intelligence", "Blockchain",
+                "DevOps", "AWS", "Docker", "Linux", "System Administration"
+            ]
+            return {"available_skills": sorted(common_skills)}
+        
+        # Fetch user's actual skills from Freelancer profile (same as extension)
+        try:
+            # Prepare headers and cookies for Freelancer API
+            headers = {"Content-Type": "application/json"}
+            cookies = {}
+            
+            # Use cookies if available (same logic as projects endpoint)
+            if credentials.cookies:
+                try:
+                    cookie_data = credentials.cookies if isinstance(credentials.cookies, dict) else json.loads(credentials.cookies)
+                    
+                    # Set up cookies for the request
+                    if cookie_data.get("GETAFREE_USER_ID"):
+                        cookies["GETAFREE_USER_ID"] = cookie_data["GETAFREE_USER_ID"]
+                    if cookie_data.get("GETAFREE_AUTH_HASH_V2"):
+                        cookies["GETAFREE_AUTH_HASH_V2"] = cookie_data["GETAFREE_AUTH_HASH_V2"]
+                    if cookie_data.get("XSRF_TOKEN"):
+                        cookies["XSRF-TOKEN"] = cookie_data["XSRF_TOKEN"]
+                        headers["X-XSRF-TOKEN"] = cookie_data["XSRF_TOKEN"]
+                    if cookie_data.get("session2"):
+                        cookies["session2"] = cookie_data["session2"]
+                    if cookie_data.get("qfence"):
+                        cookies["qfence"] = cookie_data["qfence"]
+                    
+                    print(f"🍪 Using cookies for skills API call: {list(cookies.keys())}")
+                except Exception as e:
+                    print(f"⚠️ Error parsing cookies: {e}")
+            
+            # Fallback to OAuth token if no cookies or as backup
+            if credentials.access_token and credentials.access_token != "using_cookies":
+                headers["Authorization"] = f"Bearer {credentials.access_token}"
+                headers["freelancer-oauth-v1"] = credentials.access_token
+                print("🔑 Using OAuth token for skills API call")
+            
+            # Use the exact same API call as the extension
+            profile_url = "https://www.freelancer.com/api/users/0.1/self?limit=1&jobs=true&webapp=1&compact=true&new_errors=true&new_pools=true"
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(profile_url, headers=headers, cookies=cookies)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    user_profile = data.get("result", {})
+                    
+                    # Extract skills from jobs array (same as extension)
+                    if user_profile.get("jobs") and len(user_profile["jobs"]) > 0:
+                        skills = [job["name"] for job in user_profile["jobs"]]
+                        print(f"✅ Fetched {len(skills)} skills from user profile: {skills}")
+                        return {"available_skills": sorted(skills)}
+                    else:
+                        print("ℹ️ No skills found in user profile")
+                        # Return common skills as fallback
+                        common_skills = [
+                            "PHP", "JavaScript", "HTML", "CSS", "WordPress", "Python", "React", "Node.js",
+                            "MySQL", "Laravel", "Vue.js", "Angular", "Bootstrap", "jQuery", "AJAX",
+                            "Web Development", "Mobile App Development", "Android", "iOS", "Flutter",
+                            "Graphic Design", "Logo Design", "Photoshop", "Illustrator", "UI/UX Design",
+                            "Content Writing", "Copywriting", "SEO", "Digital Marketing", "Social Media Marketing",
+                            "Data Entry", "Excel", "Virtual Assistant", "Customer Service", "Translation",
+                            "Video Editing", "Animation", "3D Modeling", "Game Development", "Unity",
+                            "Machine Learning", "Data Science", "Artificial Intelligence", "Blockchain",
+                            "DevOps", "AWS", "Docker", "Linux", "System Administration"
+                        ]
+                        return {"available_skills": sorted(common_skills)}
+                elif response.status_code == 401:
+                    raise HTTPException(status_code=401, detail="Freelancer credentials expired. Please reconnect.")
+                else:
+                    print(f"⚠️ Could not get user profile: {response.status_code}")
+                    # Return common skills as fallback
+                    common_skills = [
+                        "PHP", "JavaScript", "HTML", "CSS", "WordPress", "Python", "React", "Node.js",
+                        "MySQL", "Laravel", "Vue.js", "Angular", "Bootstrap", "jQuery", "AJAX",
+                        "Web Development", "Mobile App Development", "Android", "iOS", "Flutter",
+                        "Graphic Design", "Logo Design", "Photoshop", "Illustrator", "UI/UX Design",
+                        "Content Writing", "Copywriting", "SEO", "Digital Marketing", "Social Media Marketing",
+                        "Data Entry", "Excel", "Virtual Assistant", "Customer Service", "Translation",
+                        "Video Editing", "Animation", "3D Modeling", "Game Development", "Unity",
+                        "Machine Learning", "Data Science", "Artificial Intelligence", "Blockchain",
+                        "DevOps", "AWS", "Docker", "Linux", "System Administration"
+                    ]
+                    return {"available_skills": sorted(common_skills)}
+                    
+        except Exception as e:
+            print(f"⚠️ Error fetching skills from Freelancer profile: {e}")
+            # Return common skills as fallback
+            common_skills = [
+                "PHP", "JavaScript", "HTML", "CSS", "WordPress", "Python", "React", "Node.js",
+                "MySQL", "Laravel", "Vue.js", "Angular", "Bootstrap", "jQuery", "AJAX",
+                "Web Development", "Mobile App Development", "Android", "iOS", "Flutter",
+                "Graphic Design", "Logo Design", "Photoshop", "Illustrator", "UI/UX Design",
+                "Content Writing", "Copywriting", "SEO", "Digital Marketing", "Social Media Marketing",
+                "Data Entry", "Excel", "Virtual Assistant", "Customer Service", "Translation",
+                "Video Editing", "Animation", "3D Modeling", "Game Development", "Unity",
+                "Machine Learning", "Data Science", "Artificial Intelligence", "Blockchain",
+                "DevOps", "AWS", "Docker", "Linux", "System Administration"
+            ]
+            return {"available_skills": sorted(common_skills)}
+        
+    except Exception as e:
+        print(f"Error getting available freelancer skills: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get available skills")
 
 @app.delete("/api/freelancer/disconnect")
 async def disconnect_freelancer(

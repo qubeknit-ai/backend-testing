@@ -117,7 +117,8 @@ class AutoBidder:
                             "currencies": db_setting.currencies,
                             "frequency_minutes": db_setting.frequency_minutes,
                             "max_project_bids": db_setting.max_project_bids,
-                            "smart_bidding": db_setting.smart_bidding
+                            "smart_bidding": db_setting.smart_bidding,
+                            "min_skill_match": getattr(db_setting, 'min_skill_match', 1)
                         }
                         
                         # Check if user should be skipped due to frequency limits
@@ -238,6 +239,28 @@ class AutoBidder:
                 logger.error(f"🚫 User {user_id}: Daily bid limit reached - stopping bid cycle")
                 return False
             
+            # 0.5. Get user's selected skills from database
+            user_selected_skills = []
+            try:
+                from database import SessionLocal
+                from models import FreelancerCredentials
+                
+                db = SessionLocal()
+                try:
+                    credentials = db.query(FreelancerCredentials).filter(
+                        FreelancerCredentials.user_id == user_id
+                    ).first()
+                    
+                    if credentials and credentials.selected_skills:
+                        user_selected_skills = credentials.selected_skills
+                        logger.info(f"🎯 User {user_id}: Found {len(user_selected_skills)} selected skills: {user_selected_skills}")
+                    else:
+                        logger.info(f"ℹ️  User {user_id}: No selected skills found, will use all profile skills")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.error(f"❌ Error getting selected skills for User {user_id}: {e}")
+            
             # 1. Fetch projects using existing API for THIS user
             projects = await self._fetch_projects(user_id)
             if not projects:
@@ -251,13 +274,15 @@ class AutoBidder:
             projects_to_process = projects
             logger.info(f"📥 User {user_id}: Processing all {len(projects_to_process)} projects (filtering by bid history)")
 
-            # 2. Filter projects by criteria for THIS user (including freshness check)
-            filtered_projects = self._filter_projects(projects_to_process, settings)
+            # 2. Filter projects by criteria for THIS user (including freshness check and skill matching)
+            filtered_projects = self._filter_projects(projects_to_process, settings, user_selected_skills)
             if not filtered_projects:
-                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, max age: 10 minutes)")
+                min_skill_match = settings.get("min_skill_match", 1)
+                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, min skills: {min_skill_match}, max age: 10 minutes)")
                 return False
 
-            logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, posted within 10 minutes)")
+            min_skill_match = settings.get("min_skill_match", 1)
+            logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, min skills: {min_skill_match}, posted within 10 minutes)")
 
             # 3. Sort by NEWEST first ONLY - prioritize the freshest opportunities
             filtered_projects.sort(key=lambda p: -(p.get("time_submitted", 0)))  # Only sort by newest first
@@ -388,9 +413,28 @@ class AutoBidder:
                         
                         logger.info(f"👤 User {user_id}: Profile keys: {list(user_profile.keys()) if isinstance(user_profile, dict) else type(user_profile)}")
                         
-                        if user_profile.get("jobs") and len(user_profile["jobs"]) > 0:
+                        # Get selected skills from database instead of all profile skills
+                        selected_skill_names = credentials.selected_skills or []
+                        logger.info(f"🎯 User {user_id}: Selected skills from database: {selected_skill_names}")
+                        
+                        # If user has selected skills, find their IDs from the profile
+                        if selected_skill_names and user_profile.get("jobs"):
+                            profile_jobs = user_profile["jobs"]
+                            # Match selected skill names with profile job IDs
+                            for job in profile_jobs:
+                                if job.get("name") in selected_skill_names:
+                                    user_skills.append(job["id"])
+                            
+                            logger.info(f"✅ User {user_id}: Matched skill IDs from profile: {user_skills}")
+                            
+                            # If no matches found in profile, we'll use all profile skills as fallback
+                            if not user_skills and profile_jobs:
+                                logger.warning(f"⚠️  User {user_id}: No selected skills matched profile, using all profile skills as fallback")
+                                user_skills = [job["id"] for job in profile_jobs]
+                        elif user_profile.get("jobs"):
+                            # No skills selected, use all profile skills
                             user_skills = [job["id"] for job in user_profile["jobs"]]
-                            logger.info(f"✅ User {user_id}: Found {len(user_skills)} skills: {user_skills[:5]}...")
+                            logger.info(f"✅ User {user_id}: Using all profile skills (no selection): {user_skills}")
                         else:
                             logger.info(f"ℹ️  User {user_id}: No skills found in user profile")
                     else:
@@ -586,18 +630,21 @@ class AutoBidder:
         # Default fallback
         return "USD"
 
-    def _filter_projects(self, projects: List[Dict], settings: Dict) -> List[Dict]:
-        """Filter projects based on settings - focus on currency and freshness only"""
+    def _filter_projects(self, projects: List[Dict], settings: Dict, user_selected_skills: List[str] = None) -> List[Dict]:
+        """Filter projects based on settings - focus on currency, freshness, and skill matching"""
         
         max_bids = settings.get("max_project_bids", 50)
         supported_currencies = settings.get("currencies", ["USD"])
+        min_skill_match = settings.get("min_skill_match", 1)
         max_age_minutes = 10  # Only bid on projects posted within last 10 minutes for freshness
         
         filtered = []
         import time
         current_timestamp = time.time()
 
-        logger.info(f"🔍 Starting filter process - Max bids: {max_bids}, Currencies: {supported_currencies}, Max age: {max_age_minutes}m")
+        logger.info(f"🔍 Starting filter process - Max bids: {max_bids}, Currencies: {supported_currencies}, Min skill match: {min_skill_match}, Max age: {max_age_minutes}m")
+        if user_selected_skills:
+            logger.info(f"🎯 User selected skills for matching: {user_selected_skills}")
 
         for project in projects:
             project_id = project.get("id")
@@ -609,7 +656,7 @@ class AutoBidder:
                 logger.debug(f"❌ Project {project_id} '{project_title}...' - CURRENCY MISMATCH: {project_currency} not in {supported_currencies}")
                 continue
 
-            # 2. Check project age - only bid on FRESH projects (within last 30 minutes)
+            # 2. Check project age - only bid on FRESH projects (within last 10 minutes)
             time_submitted = project.get("time_submitted", 0)
             if time_submitted > 0:
                 age_minutes = (current_timestamp - time_submitted) / 60
@@ -624,7 +671,27 @@ class AutoBidder:
                 logger.debug(f"❌ Project {project_id} '{project_title}...' - NO TIMESTAMP")
                 continue
 
-            # 3. Check bid count LAST (less important than freshness and currency)
+            # 3. Check skill matching if user has selected skills
+            if user_selected_skills and min_skill_match > 0:
+                project_skills = []
+                if project.get("jobs"):
+                    project_skills = [job.get("name") for job in project["jobs"] if job.get("name")]
+                
+                # Count matching skills
+                matching_skills = []
+                for skill in user_selected_skills:
+                    if skill in project_skills:
+                        matching_skills.append(skill)
+                
+                skill_match_count = len(matching_skills)
+                
+                if skill_match_count < min_skill_match:
+                    logger.debug(f"❌ Project {project_id} '{project_title}...' - SKILL MISMATCH: {skill_match_count}/{min_skill_match} skills match. Project skills: {project_skills[:3]}...")
+                    continue
+                else:
+                    logger.info(f"🎯 Project {project_id} '{project_title}...' - SKILL MATCH: {skill_match_count}/{min_skill_match} skills match: {matching_skills}")
+
+            # 4. Check bid count LAST (less important than freshness, currency, and skills)
             bid_count = project.get("bid_stats", {}).get("bid_count", 0)
             if bid_count > max_bids:
                 logger.debug(f"❌ Project {project_id} '{project_title}...' - TOO MANY BIDS: {bid_count} > {max_bids}")
