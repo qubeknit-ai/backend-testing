@@ -667,11 +667,11 @@ class AutoBidder:
         import time
         current_timestamp = time.time()
 
-        logger.info(f"🔍 Starting filter process - Max bids: {max_bids}, Currencies: {supported_currencies}, Min skill match: {min_skill_match}, Max age: {max_age_minutes}m")
+        logger.info(f"🔍 Starting filter process - Max bids: {max_bids}, Currencies: {supported_currencies}, Min skill match: DISABLED (API limitation), Max age: {max_age_minutes}m")
         if user_selected_skills:
-            logger.info(f"🎯 User selected skills for matching: {user_selected_skills}")
+            logger.info(f"ℹ️  User has selected skills but skill matching is disabled (API doesn't return skill data): {user_selected_skills}")
         else:
-            logger.info(f"ℹ️  No user selected skills - skill matching will be skipped")
+            logger.info(f"ℹ️  No user selected skills")
 
         for project in projects:
             project_id = project.get("id")
@@ -699,7 +699,10 @@ class AutoBidder:
                 continue
 
             # 3. Check skill matching if user has selected skills
-            if user_selected_skills and min_skill_match > 0:
+            # TEMPORARILY DISABLED - API doesn't return skill data in project list
+            # The Freelancer API project list endpoint doesn't include 'jobs' field
+            # Skill matching will need to be done after fetching individual project details
+            if False and user_selected_skills and min_skill_match > 0:
                 project_skills = []
                 
                 # Try multiple ways to extract skills from project data
@@ -806,7 +809,7 @@ class AutoBidder:
                     else:
                         logger.info(f"🎯 Project {project_id} '{project_title}...' - SKILL MATCH: {skill_match_count}/{min_skill_match} skills match: {matching_skills}")
             else:
-                logger.info(f"⏭️  Project {project_id} '{project_title}...' - SKILL CHECK SKIPPED (no selected skills or min_skill_match=0)")
+                logger.debug(f"⏭️  Project {project_id} '{project_title}...' - SKILL CHECK SKIPPED (API doesn't return skill data)")
 
             # 4. Check bid count LAST (less important than freshness, currency, and skills)
             bid_count = project.get("bid_stats", {}).get("bid_count", 0)
