@@ -24,6 +24,71 @@ class AutoBidder:
             cls._instance = super(AutoBidder, cls).__new__(cls)
         return cls._instance
 
+    async def debug_project_structure(self, user_id: int, limit: int = 5):
+        """Debug function to examine actual project structure from Freelancer API"""
+        logger.info("🔍 DEBUG: Examining Freelancer API project structure...")
+        
+        projects = await self._fetch_projects(user_id)
+        
+        if not projects:
+            logger.info("❌ No projects found for debugging")
+            return
+        
+        logger.info(f"📊 Found {len(projects)} projects for structure analysis")
+        
+        # Analyze first few projects
+        for i, project in enumerate(projects[:limit]):
+            logger.info(f"\n🔍 PROJECT {i+1} STRUCTURE ANALYSIS:")
+            logger.info(f"   Title: {project.get('title', 'Unknown')[:50]}...")
+            logger.info(f"   ID: {project.get('id')}")
+            
+            # Show all top-level fields
+            logger.info(f"   📋 Field count: {len(project.keys())}")
+            
+            # Examine potential skill-related fields in detail
+            skill_fields = ['jobs', 'skills', 'categories', 'tags']
+            
+            for field in skill_fields:
+                if project.get(field):
+                    value = project[field]
+                    logger.info(f"   🎯 {field}: Found ({len(value) if isinstance(value, list) else 'object'})")
+                else:
+                    logger.info(f"   ❌ {field}: NOT_FOUND")
+            
+            # Show title only
+            logger.info(f"   📝 Title: {project.get('title', 'Unknown')[:80]}...")
+            
+            logger.info("   " + "─" * 50)
+        
+        logger.info("🔍 DEBUG: Project structure analysis complete")
+
+    async def test_skill_extraction(self, user_id: int, selected_skills: list = None):
+        """Test skill extraction with current logic"""
+        if selected_skills is None:
+            selected_skills = []  # Test with no selected skills
+        
+        logger.info(f"🧪 TESTING skill extraction with skills: {selected_skills if selected_skills else 'None (testing no skill filter)'}")
+        
+        projects = await self._fetch_projects(user_id)
+        if not projects:
+            logger.info("❌ No projects found for testing")
+            return
+        
+        # Test filtering logic
+        settings = {
+            "currencies": ["USD"],
+            "max_project_bids": 50,
+            "min_skill_match": 1 if selected_skills else 0  # Set to 0 if no skills selected
+        }
+        
+        filtered = self._filter_projects(projects[:10], settings, selected_skills)
+        
+        logger.info(f"🧪 TEST RESULTS:")
+        logger.info(f"   📥 Total projects tested: {len(projects[:10])}")
+        logger.info(f"   ✅ Projects passing skill filter: {len(filtered)}")
+        logger.info(f"   📊 Success rate: {len(filtered)/len(projects[:10])*100:.1f}%")
+        logger.info(f"   🎯 Skill matching mode: {'Specific skills' if selected_skills else 'No skill filter (allow all)'}")
+
     def set_user_context(self, user_id: int):
         """Set the current user context for the auto-bidder (Legacy support)"""
         # Kept for compatibility but mostly unused in multi-user mode
@@ -191,6 +256,56 @@ class AutoBidder:
                 logger.error(traceback.format_exc())
                 await asyncio.sleep(60)
 
+    async def _cleanup_old_bid_history(self, user_id: int, days_to_keep: int = 7):
+        """Clean up old bid history entries to prevent database bloat"""
+        try:
+            from database import SessionLocal
+            from models import BidHistory
+            from datetime import datetime, timedelta
+            
+            db = SessionLocal()
+            try:
+                # Delete bid history older than specified days
+                cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+                
+                deleted_count = db.query(BidHistory).filter(
+                    BidHistory.user_id == user_id,
+                    BidHistory.created_at < cutoff_date
+                ).delete()
+                
+                if deleted_count > 0:
+                    db.commit()
+                    logger.info(f"🧹 User {user_id}: Cleaned up {deleted_count} old bid history entries (>{days_to_keep} days)")
+                
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Error cleaning up bid history for User {user_id}: {e}")
+
+    async def _has_bid_history(self, user_id: int, project_id: str) -> bool:
+        """Check if user has already attempted to bid on this project"""
+        try:
+            from database import SessionLocal
+            from models import BidHistory
+            
+            db = SessionLocal()
+            try:
+                # Check if there's any bid history for this user and project
+                existing_bid = db.query(BidHistory).filter(
+                    BidHistory.user_id == user_id,
+                    BidHistory.project_id == project_id
+                ).first()
+                
+                return existing_bid is not None
+                
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Error checking bid history for User {user_id}, Project {project_id}: {e}")
+            return False  # If we can't check, allow bidding (fail-safe)
+
     async def _check_daily_bid_limit(self, user_id: int, settings: Dict) -> bool:
         """Check if user has reached their daily bid limit"""
         daily_limit = settings.get("daily_bids", 10)
@@ -238,6 +353,9 @@ class AutoBidder:
             if not await self._check_daily_bid_limit(user_id, settings):
                 logger.error(f"🚫 User {user_id}: Daily bid limit reached - stopping bid cycle")
                 return False
+            
+            # 0.1. Clean up old bid history (once per cycle)
+            await self._cleanup_old_bid_history(user_id, days_to_keep=7)
             
             # 0.5. Get user's selected skills from database
             user_selected_skills = []
@@ -289,20 +407,19 @@ class AutoBidder:
             
             # Log the sorting to verify we're prioritizing the absolute newest projects
             if filtered_projects:
-                logger.info(f"📅 User {user_id}: Projects sorted by NEWEST first (freshest opportunities):")
-                for i, project in enumerate(filtered_projects[:5]):  # Show first 5
-                    time_submitted = project.get("time_submitted", 0)
-                    posted_time = self._format_time_ago(time_submitted) if time_submitted else "Unknown time"
-                    import time
-                    current_timestamp = time.time()
-                    age_minutes = (current_timestamp - time_submitted) / 60 if time_submitted else 999
-                    logger.info(f"   {i+1}. '{project.get('title', 'Unknown')[:40]}...' posted {posted_time} ({age_minutes:.1f}m ago)")
+                logger.info(f"📅 User {user_id}: {len(filtered_projects)} fresh projects sorted by newest first")
             
             # 4. Try to bid on projects in order (newest first) until one succeeds
-            # Removed historical bid filtering - let it bid on fresh projects
+            # Check bid history to avoid re-bidding on same projects
             for project in filtered_projects:
                 project_id = str(project.get("id"))
                 project_title = project.get("title", "Unknown")[:50]
+                
+                # Check if we've already attempted to bid on this project
+                if await self._has_bid_history(user_id, project_id):
+                    logger.info(f"⏭️  User {user_id}: Skipping '{project_title}...' - Already attempted (in bid history)")
+                    continue  # Move to next project
+                    continue
                 
                 # Log project details before attempting bid
                 time_submitted = project.get("time_submitted", 0)
@@ -311,17 +428,7 @@ class AutoBidder:
                 budget_str = f"${budget.get('minimum', 0)}-${budget.get('maximum', 0)}"
                 project_currency = self._get_project_currency(project)
                 
-                # Debug: Log timestamp details
-                if time_submitted:
-                    import time
-                    current_timestamp = time.time()
-                    age_minutes = (current_timestamp - time_submitted) / 60
-                    logger.info(f"🕐 Fresh project - Current: {current_timestamp}, Project: {time_submitted}, Age: {age_minutes:.1f} minutes")
-                
-                logger.info(f"🎯 User {user_id}: Attempting bid on FRESH project '{project_title}...' (ID: {project_id})")
-                logger.info(f"   📅 Posted: {posted_time}")
-                logger.info(f"   💰 Budget: {budget_str} ({project_currency})")
-                logger.info(f"   👥 Bids: {project.get('bid_stats', {}).get('bid_count', 0)}")
+                logger.info(f"🎯 User {user_id}: Bidding on '{project_title}...' - {posted_time} - {budget_str} ({project_currency}) - {project.get('bid_stats', {}).get('bid_count', 0)} bids")
                 
                 try:
                     bid_result = await self._bid_on_project(user_id, project, settings)
@@ -353,7 +460,19 @@ class AutoBidder:
             logger.info(f"📊 User {user_id}: CYCLE SUMMARY:")
             logger.info(f"   📥 Total projects fetched: {len(projects)}")
             logger.info(f"   ⚡ Fresh projects (≤10min): {len(filtered_projects)}")
-            logger.info(f"   💡 Reason: All fresh projects failed to bid - check credentials or try again next cycle")
+            
+            # Count how many were skipped due to bid history
+            skipped_count = 0
+            for project in filtered_projects:
+                project_id = str(project.get("id"))
+                if await self._has_bid_history(user_id, project_id):
+                    skipped_count += 1
+            
+            if skipped_count > 0:
+                logger.info(f"   ⏭️  Already attempted: {skipped_count}")
+                logger.info(f"   🆕 New projects to try: {len(filtered_projects) - skipped_count}")
+            
+            logger.info(f"   💡 Result: No successful bids this cycle")
             
             return False
 
@@ -449,13 +568,11 @@ class AutoBidder:
                         # Build URL with user skills - ALWAYS sort by NEWEST first for fresh opportunities
                         if user_skills:
                             skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
-                            # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
-                            # Add full_description=true to get more project details including skills
-                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit={limit}&user_details=true&jobs=true&full_description=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
+                            # Try different API parameters to get job/skill data
+                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit={limit}&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
                         else:
-                            # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
-                            # Add full_description=true to get more project details including skills
-                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit={limit}&user_details=true&jobs=true&full_description=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
+                            # Try different API parameters to get job/skill data
+                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit={limit}&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
                         
                         logger.info(f"🌐 User {user_id}: Using URL: {url[:100]}...")
                         
@@ -504,45 +621,24 @@ class AutoBidder:
                         first_project = projects[0]
                         logger.info(f"📝 User {user_id}: Sample project keys: {list(first_project.keys()) if isinstance(first_project, dict) else type(first_project)}")
                         
-                        # Log detailed structure of first project to find skills/tags
-                        logger.info(f"🔍 User {user_id}: First project detailed structure:")
-                        for key, value in first_project.items():
-                            if isinstance(value, (list, dict)):
-                                if len(str(value)) < 500:  # Show full content for smaller objects
-                                    logger.info(f"   {key}: {value}")
-                                else:
-                                    logger.info(f"   {key}: {type(value)} (length: {len(value) if isinstance(value, (list, dict)) else len(str(value))})")
-                            else:
-                                logger.info(f"   {key}: {value}")
+                        # Log basic project info only
+                        logger.info(f"📝 User {user_id}: Sample project - Title: {first_project.get('title', 'Unknown')[:50]}...")
+                        logger.info(f"📝 User {user_id}: Available fields: {len(first_project.keys())} fields total")
                         
-                        # Also check if there are nested objects that might contain skills
-                        if 'owner' in first_project and isinstance(first_project['owner'], dict):
-                            logger.info(f"🔍 User {user_id}: Project owner structure:")
-                            for key, value in first_project['owner'].items():
-                                logger.info(f"   owner.{key}: {value}")
-                        
-                        if 'budget' in first_project and isinstance(first_project['budget'], dict):
-                            logger.info(f"🔍 User {user_id}: Project budget structure:")
-                            for key, value in first_project['budget'].items():
-                                logger.info(f"   budget.{key}: {value}")
-                        
-                        # Log posting times of first 5 projects to verify we're getting latest
-                        for i, project in enumerate(projects[:5]):
-                            time_submitted = project.get("time_submitted", 0)
-                            if time_submitted:
-                                posted_time = self._format_time_ago(time_submitted)
-                                project_currency = self._get_project_currency(project)
-                                bid_count = project.get("bid_stats", {}).get("bid_count", 0)
-                                logger.info(f"📋 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' posted {posted_time} - Currency: {project_currency} - Bids: {bid_count}")
-                            else:
-                                logger.info(f"📋 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:50]}...' - no timestamp")
+                # Log posting times of first 3 projects only (reduced from 5)
+                for i, project in enumerate(projects[:3]):
+                    time_submitted = project.get("time_submitted", 0)
+                    if time_submitted:
+                        posted_time = self._format_time_ago(time_submitted)
+                        project_currency = self._get_project_currency(project)
+                        bid_count = project.get("bid_stats", {}).get("bid_count", 0)
+                        logger.info(f"📋 User {user_id}: Project {i+1} '{project.get('title', 'Unknown')[:30]}...' - {posted_time} - {project_currency} - {bid_count} bids")
                     
                     # If no projects found with skills, try without skills filter - ALWAYS get NEWEST first
                     if len(projects) == 0 and user_skills:
                         logger.info(f"🔄 User {user_id}: No projects with skills filter, trying general search...")
-                        # CRITICAL: Always fetch NEWEST projects first to get fresh opportunities
-                        # Add full_description=true to get more project details including skills
-                        fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit=100&user_details=true&jobs=true&full_description=true&sort_field=time_submitted&sort_order=desc"
+                        # Try different API parameters to get job/skill data
+                        fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit=100&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc"
                         
                         fallback_response = await client.get(
                             fallback_url,
@@ -667,11 +763,11 @@ class AutoBidder:
         import time
         current_timestamp = time.time()
 
-        logger.info(f"🔍 Starting filter process - Max bids: {max_bids}, Currencies: {supported_currencies}, Min skill match: DISABLED (API limitation), Max age: {max_age_minutes}m")
+        logger.info(f"🔍 Starting filter process - Max bids: {max_bids}, Currencies: {supported_currencies}, Min skill match: {min_skill_match}, Max age: {max_age_minutes}m")
         if user_selected_skills:
-            logger.info(f"ℹ️  User has selected skills but skill matching is disabled (API doesn't return skill data): {user_selected_skills}")
+            logger.info(f"🎯 User selected skills for matching: {user_selected_skills}")
         else:
-            logger.info(f"ℹ️  No user selected skills")
+            logger.info(f"✅ No user selected skills - allowing all projects with any detectable skills (skill extraction still active)")
 
         for project in projects:
             project_id = project.get("id")
@@ -698,118 +794,152 @@ class AutoBidder:
                 logger.debug(f"❌ Project {project_id} '{project_title}...' - NO TIMESTAMP")
                 continue
 
-            # 3. Check skill matching if user has selected skills
-            # TEMPORARILY DISABLED - API doesn't return skill data in project list
-            # The Freelancer API project list endpoint doesn't include 'jobs' field
-            # Skill matching will need to be done after fetching individual project details
-            if False and user_selected_skills and min_skill_match > 0:
+            # 3. Check skill matching - now enabled for all projects
+            # Will use selected skills if available, otherwise allow all skills
+            if min_skill_match > 0:
                 project_skills = []
                 
                 # Try multiple ways to extract skills from project data
-                # Method 1: Standard jobs field
+                # Method 1: Standard jobs field (most common)
                 if project.get("jobs"):
-                    project_skills.extend([job.get("name") for job in project["jobs"] if job.get("name")])
+                    jobs = project["jobs"]
+                    if isinstance(jobs, list):
+                        for job in jobs:
+                            if isinstance(job, dict):
+                                # Try different job name fields
+                                skill_name = (job.get("name") or 
+                                            job.get("job_name") or 
+                                            job.get("title") or 
+                                            job.get("skill_name"))
+                                if skill_name:
+                                    project_skills.append(skill_name)
+                            elif isinstance(job, str):
+                                project_skills.append(job)
                 
                 # Method 2: Direct skills field
                 if project.get("skills"):
-                    if isinstance(project["skills"], list):
-                        project_skills.extend([skill.get("name") if isinstance(skill, dict) else str(skill) for skill in project["skills"]])
+                    skills = project["skills"]
+                    if isinstance(skills, list):
+                        for skill in skills:
+                            if isinstance(skill, dict):
+                                skill_name = skill.get("name") or skill.get("skill_name")
+                                if skill_name:
+                                    project_skills.append(skill_name)
+                            elif isinstance(skill, str):
+                                project_skills.append(skill)
                 
-                # Method 3: Tags field
-                if project.get("tags"):
-                    if isinstance(project["tags"], list):
-                        project_skills.extend([tag.get("name") if isinstance(tag, dict) else str(tag) for tag in project["tags"]])
-                
-                # Method 4: Categories field
-                if project.get("categories"):
-                    if isinstance(project["categories"], list):
-                        project_skills.extend([cat.get("name") if isinstance(cat, dict) else str(cat) for cat in project["categories"]])
-                
-                # Method 5: Job categories field
-                if project.get("job_categories"):
-                    if isinstance(project["job_categories"], list):
-                        project_skills.extend([cat.get("name") if isinstance(cat, dict) else str(cat) for cat in project["job_categories"]])
-                
-                # Method 6: Check for other possible skill fields
-                for field_name in ['job_skills', 'project_skills', 'required_skills', 'skill_tags', 'job_tags']:
+                # Method 3: Categories/Tags fields
+                for field_name in ["categories", "tags", "job_categories", "project_categories"]:
                     if project.get(field_name):
-                        if isinstance(project[field_name], list):
-                            project_skills.extend([item.get("name") if isinstance(item, dict) else str(item) for item in project[field_name]])
+                        items = project[field_name]
+                        if isinstance(items, list):
+                            for item in items:
+                                if isinstance(item, dict):
+                                    name = item.get("name") or item.get("category_name")
+                                    if name:
+                                        project_skills.append(name)
+                                elif isinstance(item, str):
+                                    project_skills.append(item)
                 
-                # Method 7: Try to extract from description or title (as last resort)
-                # Common skill keywords that might appear in project descriptions
+                # Method 4: Extract from description using common skill keywords
+                description_text = (project.get("description", "") + " " + 
+                                  project.get("preview_description", "") + " " + 
+                                  project.get("title", "")).lower()
+                
+                # Common freelancer skills that might appear in descriptions
                 common_skills = [
-                    'PHP', 'JavaScript', 'Python', 'Java', 'C++', 'HTML', 'CSS', 'React', 'Angular', 'Vue',
-                    'Node.js', 'Laravel', 'WordPress', 'Shopify', 'Android', 'iOS', 'Flutter', 'React Native',
-                    'Data Entry', 'Excel', 'Graphic Design', 'Logo Design', 'Photoshop', 'Illustrator',
-                    'SEO', 'Digital Marketing', 'Content Writing', 'Copywriting', 'Translation',
-                    'MySQL', 'PostgreSQL', 'MongoDB', 'AWS', 'Azure', 'Docker', 'Kubernetes'
+                    # Programming
+                    'php', 'javascript', 'python', 'java', 'c++', 'c#', 'html', 'css', 'react', 'angular', 'vue',
+                    'node.js', 'laravel', 'wordpress', 'shopify', 'magento', 'drupal', 'joomla',
+                    # Mobile
+                    'android', 'ios', 'flutter', 'react native', 'swift', 'kotlin',
+                    # Design
+                    'graphic design', 'logo design', 'photoshop', 'illustrator', 'figma', 'sketch',
+                    'web design', 'ui design', 'ux design', 'adobe', 'coreldraw',
+                    # Marketing
+                    'seo', 'digital marketing', 'content writing', 'copywriting', 'social media',
+                    'google ads', 'facebook ads', 'email marketing',
+                    # Data
+                    'data entry', 'excel', 'data analysis', 'mysql', 'postgresql', 'mongodb',
+                    # Other
+                    'translation', 'video editing', 'animation', '3d modeling', 'autocad',
+                    'aws', 'azure', 'docker', 'kubernetes'
                 ]
                 
-                description = project.get("description", "") + " " + project.get("preview_description", "") + " " + project.get("title", "")
-                description_lower = description.lower()
-                
                 for skill in common_skills:
-                    if skill.lower() in description_lower:
-                        project_skills.append(f"{skill} (from description)")
+                    # Check for exact word matches and common variations
+                    skill_variations = [skill, skill.replace(' ', ''), skill.replace(' ', '-')]
+                    for variation in skill_variations:
+                        if variation in description_text:
+                            project_skills.append(f"{skill.title()}")
+                            break  # Avoid duplicates
                 
-                # Remove duplicates and None values
-                project_skills = list(set([skill for skill in project_skills if skill]))
+                # Remove duplicates and clean up
+                project_skills = list(set([skill.strip() for skill in project_skills if skill and skill.strip()]))
                 
-                # Enhanced logging for debugging
-                logger.info(f"🔍 Project {project_id} '{project_title}...' - SKILL DEBUG:")
-                logger.info(f"   User selected skills: {user_selected_skills}")
-                logger.info(f"   Project skills (extracted): {project_skills}")
-                logger.info(f"   Raw jobs field: {project.get('jobs', 'NOT_FOUND')}")
-                logger.info(f"   Raw skills field: {project.get('skills', 'NOT_FOUND')}")
-                logger.info(f"   Raw tags field: {project.get('tags', 'NOT_FOUND')}")
-                logger.info(f"   Raw categories field: {project.get('categories', 'NOT_FOUND')}")
-                logger.info(f"   Description snippet: {(project.get('description', '') + ' ' + project.get('preview_description', ''))[:100]}...")
+                # Enhanced logging for debugging (reduced verbosity)
+                logger.info(f"🔍 Project {project_id} '{project_title}...' - Skills: {project_skills[:5]}{'...' if len(project_skills) > 5 else ''}")
                 
-                # Log all available fields for debugging
-                logger.info(f"   Available project fields: {list(project.keys())}")
-                
-                # If project has no skills data, skip skill matching (allow the project)
+                # Debug: Show minimal info only when no skills found
                 if not project_skills:
-                    logger.info(f"⚠️  Project {project_id} '{project_title}...' - NO SKILLS DATA - Allowing project (API may not return skills)")
+                    logger.info(f"   🔧 No skills extracted from project")
+                
+                # If project has no skills data, allow the project but log it
+                if not project_skills:
+                    logger.info(f"⚠️  Project {project_id} '{project_title}...' - NO SKILLS EXTRACTED - Allowing project (may need API investigation)")
+                    # Don't skip - allow projects without detectable skills
+                elif not user_selected_skills:
+                    # User hasn't selected specific skills - allow all projects with any skills
+                    logger.info(f"✅ Project {project_id} '{project_title}...' - NO USER SKILL FILTER - Allowing project with skills: {project_skills[:3]}{'...' if len(project_skills) > 3 else ''}")
                 else:
-                    # Count matching skills with flexible matching
+                    # User has selected specific skills - perform matching
                     matching_skills = []
                     user_skills_lower = [skill.lower().strip() for skill in user_selected_skills]
                     project_skills_lower = [skill.lower().strip() for skill in project_skills]
                     
                     # Exact match first
-                    for i, skill in enumerate(user_selected_skills):
-                        if skill in project_skills:
-                            matching_skills.append(skill)
+                    for user_skill in user_selected_skills:
+                        if user_skill in project_skills:
+                            matching_skills.append(user_skill)
                     
                     # If no exact matches, try case-insensitive matching
                     if not matching_skills:
-                        for i, user_skill in enumerate(user_skills_lower):
-                            for j, project_skill in enumerate(project_skills_lower):
-                                if user_skill == project_skill:
+                        for i, user_skill_lower in enumerate(user_skills_lower):
+                            for j, project_skill_lower in enumerate(project_skills_lower):
+                                if user_skill_lower == project_skill_lower:
                                     matching_skills.append(user_selected_skills[i])
                                     break
                     
                     # If still no matches, try partial matching (contains)
                     if not matching_skills:
-                        for i, user_skill in enumerate(user_skills_lower):
-                            for j, project_skill in enumerate(project_skills_lower):
-                                if user_skill in project_skill or project_skill in user_skill:
+                        for i, user_skill_lower in enumerate(user_skills_lower):
+                            for j, project_skill_lower in enumerate(project_skills_lower):
+                                if (user_skill_lower in project_skill_lower or 
+                                    project_skill_lower in user_skill_lower):
                                     matching_skills.append(f"{user_selected_skills[i]} (partial: {project_skills[j]})")
                                     break
                     
+                    # If still no matches, try direct keyword matching in description
+                    if not matching_skills:
+                        for user_skill in user_selected_skills:
+                            skill_words = user_skill.lower().split()
+                            # Check if any significant word from the skill appears in description
+                            for word in skill_words:
+                                if len(word) > 2 and word in description_text:  # Skip short words like "ui", "3d"
+                                    matching_skills.append(f"{user_skill} (keyword)")
+                                    break
+                            if matching_skills:  # Found a match, stop looking
+                                break
+                    
                     skill_match_count = len(matching_skills)
-                    logger.info(f"   Matching skills: {matching_skills}")
-                    logger.info(f"   Match count: {skill_match_count}/{min_skill_match}")
                     
                     if skill_match_count < min_skill_match:
-                        logger.info(f"❌ Project {project_id} '{project_title}...' - SKILL MISMATCH: {skill_match_count}/{min_skill_match} skills match")
-                        continue
+                        logger.info(f"❌ Project {project_id} '{project_title}...' - Need {min_skill_match} skills, found {skill_match_count} - SKIPPING")
+                        continue  # Move to next project
                     else:
-                        logger.info(f"🎯 Project {project_id} '{project_title}...' - SKILL MATCH: {skill_match_count}/{min_skill_match} skills match: {matching_skills}")
+                        logger.info(f"🎯 Project {project_id} '{project_title}...' - SKILL MATCH: {skill_match_count}/{min_skill_match}")
             else:
-                logger.debug(f"⏭️  Project {project_id} '{project_title}...' - SKILL CHECK SKIPPED (API doesn't return skill data)")
+                logger.info(f"⏭️  Project {project_id} '{project_title}...' - SKILL MATCHING DISABLED (min_skill_match = 0)")
 
             # 4. Check bid count LAST (less important than freshness, currency, and skills)
             bid_count = project.get("bid_stats", {}).get("bid_count", 0)
@@ -1026,12 +1156,22 @@ class AutoBidder:
                     error_message = response_data.get("message", "Unknown error")
                     logger.error(f"❌ User {user_id}: Freelancer returned error: {error_message}")
                     
-                    # Check if it's "already bid" error - don't save to history
+                    # Check if it's "already bid" error - save to history to avoid retry
                     if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
-                        logger.info(f"⏭️  User {user_id}: Already bid error detected, moving to next project...")
+                        logger.info(f"⏭️  User {user_id}: Already bid error detected, saving to history...")
+                        await self._save_bid_history({
+                            "user_id": user_id,
+                            "project_id": str(project_id),
+                            "project_title": title,
+                            "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
+                            "bid_amount": bid_amount,
+                            "proposal_text": proposal,
+                            "status": "already_bid",
+                            "error_message": error_message
+                        })
                         return "ALREADY_BID"
                     
-                    # Save other errors to history
+                    # Save other errors to history to avoid retry
                     await self._save_bid_history({
                         "user_id": user_id,
                         "project_id": str(project_id),
@@ -1080,7 +1220,17 @@ class AutoBidder:
             
             # Check for specific error types
             if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
-                logger.info(f"⏭️  User {user_id}: Already bid error detected, moving to next project...")
+                logger.info(f"⏭️  User {user_id}: Already bid error detected, saving to history...")
+                await self._save_bid_history({
+                    "user_id": user_id,
+                    "project_id": str(project_id),
+                    "project_title": title,
+                    "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
+                    "bid_amount": bid_amount,
+                    "proposal_text": proposal,
+                    "status": "already_bid",
+                    "error_message": error_message
+                })
                 return "ALREADY_BID"
             
             if "used all of your bids" in error_message.lower() or "you have used all your bids" in error_message.lower() or "daily limit" in error_message.lower():
@@ -1088,7 +1238,7 @@ class AutoBidder:
                 await self._disable_user_autobidding(user_id)
                 return "BID_LIMIT_REACHED"
             
-            # Save other errors to history
+            # Save ALL other errors to history to prevent retry
             await self._save_bid_history({
                 "user_id": user_id,
                 "project_id": str(project_id),

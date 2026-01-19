@@ -2970,6 +2970,76 @@ async def test_freelancer():
             "error": str(e)
         }
 
+@app.get("/api/freelancer/debug/skills")
+async def debug_project_skills(
+    email: str = Depends(verify_token),
+    limit: int = 5
+):
+    """Debug endpoint to examine project skill extraction"""
+    try:
+        # Get user from database
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.email == email).first()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Use the debug function
+            from autobid_service import bidder
+            await bidder.debug_project_structure(user.id, limit)
+            
+            return {
+                "status": "success",
+                "message": f"Debug analysis complete for {limit} projects. Check server logs for detailed output.",
+                "user_id": user.id
+            }
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error in debug skills endpoint: {e}")
+        return {"status": "error", "error": str(e)}
+
+@app.get("/api/freelancer/test/skills")
+async def test_skill_extraction(
+    email: str = Depends(verify_token),
+    skills: str = ""  # Empty by default to test no skill filter
+):
+    """Test skill extraction with specific skills or no skills"""
+    try:
+        # Get user from database
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.email == email).first()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            # Parse skills
+            if skills.strip():
+                selected_skills = [skill.strip() for skill in skills.split(",")]
+            else:
+                selected_skills = []  # Test with no skills
+            
+            # Use the test function
+            from autobid_service import bidder
+            await bidder.test_skill_extraction(user.id, selected_skills)
+            
+            return {
+                "status": "success",
+                "message": "Skill extraction test complete. Check server logs for detailed results.",
+                "user_id": user.id,
+                "tested_skills": selected_skills if selected_skills else "None (testing no skill filter)",
+                "mode": "Specific skill matching" if selected_skills else "No skill filter (allow all projects)"
+            }
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error in test skills endpoint: {e}")
+        return {"status": "error", "error": str(e)}
+
 @app.get("/api/freelancer/debug")
 async def debug_freelancer_credentials(
     email: str = Depends(verify_token),
