@@ -2045,7 +2045,7 @@ async def get_admin_stats(user = Depends(verify_admin), db: Session = Depends(ge
         if db is None:
             raise HTTPException(status_code=500, detail="Database connection failed")
         
-        from models import User, Lead
+        from models import User, Lead, AutoBidSettings
         from datetime import datetime, timedelta
         
         # Total users
@@ -2054,17 +2054,13 @@ async def get_admin_stats(user = Depends(verify_admin), db: Session = Depends(ge
         # Total leads
         total_leads = db.query(Lead).count()
         
-        # Today's fetches (count users who fetched today)
-        today = datetime.utcnow().date()
-        today_fetches = 0
-        all_users = db.query(User).all()
-        for u in all_users:
-            if u.upwork_last_reset and u.upwork_last_reset.date() == today:
-                today_fetches += u.upwork_fetch_count or 0
-            if u.freelancer_last_reset and u.freelancer_last_reset.date() == today:
-                today_fetches += u.freelancer_fetch_count or 0
-            if u.freelancer_plus_last_reset and u.freelancer_plus_last_reset.date() == today:
-                today_fetches += u.freelancer_plus_fetch_count or 0
+        # Auto-bidder statistics
+        auto_bid_enabled_count = db.query(AutoBidSettings).filter(AutoBidSettings.enabled == True).count()
+        auto_bid_disabled_count = db.query(AutoBidSettings).filter(AutoBidSettings.enabled == False).count()
+        
+        # Average bid frequency from auto_bid_settings
+        avg_frequency_result = db.query(db.func.avg(AutoBidSettings.frequency_minutes)).scalar()
+        avg_bid_frequency = round(avg_frequency_result, 1) if avg_frequency_result else 0
         
         # Platform breakdown with revenue
         platform_counts = {}
@@ -2108,7 +2104,9 @@ async def get_admin_stats(user = Depends(verify_admin), db: Session = Depends(ge
         return {
             "totalUsers": total_users,
             "totalLeads": total_leads,
-            "todayFetches": today_fetches,
+            "autoBidEnabled": auto_bid_enabled_count,
+            "autoBidDisabled": auto_bid_disabled_count,
+            "avgBidFrequency": avg_bid_frequency,
             "platformBreakdown": platform_breakdown,
             "totalRevenue": total_revenue,
             "proposalsSent": total_proposals_sent,
