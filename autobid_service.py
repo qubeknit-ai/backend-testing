@@ -30,7 +30,7 @@ class AutoBidder:
         """Debug function to examine actual project structure from Freelancer API"""
         logger.info("🔍 DEBUG: Examining Freelancer API project structure...")
         
-        projects = await self._fetch_projects(user_id)
+        projects = await self._fetch_projects_with_fallbacks(user_id)
         
         if not projects:
             logger.info("❌ No projects found for debugging")
@@ -71,7 +71,7 @@ class AutoBidder:
         
         logger.info(f"🧪 TESTING skill extraction with skills: {selected_skills if selected_skills else 'None (testing no skill filter)'}")
         
-        projects = await self._fetch_projects(user_id)
+        projects = await self._fetch_projects_with_fallbacks(user_id)
         if not projects:
             logger.info("❌ No projects found for testing")
             return
@@ -301,12 +301,12 @@ class AutoBidder:
                 # but don't check too often to waste resources
                 if enabled_settings:
                     min_frequency_minutes = min(setting.frequency_minutes for setting in enabled_settings)
-                    # Wait for 1/4 of the minimum frequency, but at least 30 seconds, max 5 minutes
-                    smart_wait_minutes = max(0.5, min(5, min_frequency_minutes / 4))
+                    # Wait for 1/2 of the minimum frequency, but at least 1 minute, max 5 minutes
+                    smart_wait_minutes = max(1, min(5, min_frequency_minutes / 2))
                     wait_seconds = int(smart_wait_minutes * 60)
                     logger.info(f"✅ Parallel cycle complete for users {active_users}. Next check in {smart_wait_minutes} minutes ({wait_seconds}s) - min user frequency: {min_frequency_minutes}m")
                 else:
-                    wait_seconds = 30  # Check every 30 seconds if no users enabled
+                    wait_seconds = 60  # Check every 60 seconds if no users enabled
                     logger.info(f"✅ No enabled users. Waiting {wait_seconds} seconds...")
                 
                 # Add heartbeat log every cycle to prevent serverless timeout
@@ -499,11 +499,11 @@ class AutoBidder:
             
             if not filtered_projects:
                 min_skill_match = settings.get("min_skill_match", 1)
-                logger.info(f"� UUser {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, min skills: {min_skill_match}, max age: 10 minutes)")
+                logger.info(f"� UUser {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, min skills: {min_skill_match}, max age: 15 minutes)")
                 return False
 
             min_skill_match = settings.get("min_skill_match", 1)
-            logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, min skills: {min_skill_match}, posted within 10 minutes)")
+            logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, min skills: {min_skill_match}, posted within 15 minutes)")
 
             # 3. Sort by NEWEST first ONLY - prioritize the freshest opportunities
             filtered_projects.sort(key=lambda p: -(p.get("time_submitted", 0)))  # Only sort by newest first
@@ -629,7 +629,7 @@ class AutoBidder:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     # Build URL based on strategy
                     base_url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-                    params = "compact=false&limit=100&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc"
+                    params = "compact=false&limit=20&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc"
                     
                     if strategy == "skill_based":
                         # Get user skills first
@@ -686,152 +686,7 @@ class AutoBidder:
             logger.error(f"❌ Error getting user skills for User {user_id}: {e}")
             return []
 
-    async def _fetch_projects(self, user_id: int) -> List[Dict]:
-        """Fetch projects from the Freelancer API using database credentials for SPECIFIC USER"""
-        logger.info(f"🔍 User {user_id}: Fetching projects...")
-        
-        try:
-            # Get freelancer credentials directly from database
-            from database import SessionLocal
-            from models import FreelancerCredentials
-            
-            db = SessionLocal()
-            try:
-                # Get credentials for THIS SPECIFIC USER
-                credentials = db.query(FreelancerCredentials).filter(
-                    FreelancerCredentials.user_id == user_id,
-                    FreelancerCredentials.is_validated == True
-                ).first()
-                
-                if not credentials:
-                    logger.warning(f"⚠️  User {user_id}: No validated credentials found")
-                    return []
-                
-                # Prepare headers and cookies
-                headers = {"Content-Type": "application/json"}
-                cookies_dict = {}
-                if credentials.cookies:
-                    cookies_dict = credentials.cookies
-                
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    # Step 1: Get user profile to fetch skills
-                    user_profile_url = "https://www.freelancer.com/api/users/0.1/self?limit=1&jobs=true&webapp=1&compact=true"
-                    user_response = await client.get(user_profile_url, headers=headers, cookies=cookies_dict)
-                    
-                    user_skills = []
-                    if user_response.status_code == 200:
-                        user_data = user_response.json()
-                        user_profile = user_data.get("result", {})
-                        
-                        # Get selected skills from database
-                        selected_skill_names = credentials.selected_skills or []
-                        
-                        # Match selected skill names with profile job IDs
-                        if selected_skill_names and user_profile.get("jobs"):
-                            profile_jobs = user_profile["jobs"]
-                            for job in profile_jobs:
-                                if job.get("name") in selected_skill_names:
-                                    user_skills.append(job["id"])
-                            
-                            # Fallback to all profile skills if no matches
-                            if not user_skills and profile_jobs:
-                                user_skills = [job["id"] for job in profile_jobs]
-                        elif user_profile.get("jobs"):
-                            user_skills = [job["id"] for job in user_profile["jobs"]]
-                    else:
-                        logger.warning(f"⚠️  User {user_id}: Profile fetch failed: {user_response.status_code}")
-                    
-                    # Step 2: Fetch projects with different limits
-                    projects = []
-                    for limit in [50, 100, 150]:
-                        # Build URL with user skills - sort by NEWEST first
-                        if user_skills:
-                            skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
-                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit={limit}&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
-                        else:
-                            url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit={limit}&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
-                        
-                        response = await client.get(url, headers=headers, cookies=cookies_dict)
-                        
-                        if response.status_code == 200:
-                            data = response.json()
-                            result = data.get("result", {})
-                            if isinstance(result, dict):
-                                projects = result.get("projects", [])
-                            else:
-                                projects = []
-                            
-                            logger.info(f"✅ User {user_id}: Fetched {len(projects)} projects")
-                            
-                            # Check if we should try higher limit
-                            if len(projects) >= limit * 0.8:
-                                continue
-                            else:
-                                break
-                                
-                        elif response.status_code == 401:
-                            logger.error(f"🔐 User {user_id}: Credentials EXPIRED (401)")
-                            return []
-                        else:
-                            logger.error(f"❌ User {user_id}: API failed: {response.status_code}")
-                            break
-                    
-                    # Log sample project info
-                    if projects and len(projects) > 0:
-                        logger.info(f"📝 User {user_id}: Sample project available with {len(projects[0].keys())} fields")
-                        
-                        # Log first 3 projects timing only
-                        for i, project in enumerate(projects[:3]):
-                            time_submitted = project.get("time_submitted", 0)
-                            if time_submitted:
-                                posted_time = self._format_time_ago(time_submitted)
-                                project_currency = self._get_project_currency(project)
-                                bid_count = project.get("bid_stats", {}).get("bid_count", 0)
-                                logger.info(f"📋 Project {i+1}: {posted_time} - {project_currency} - {bid_count} bids")
-                    
-                    # Fallback search if no projects with skills
-                    if len(projects) == 0 and user_skills:
-                        fallback_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=false&limit=100&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc"
-                        fallback_response = await client.get(fallback_url, headers=headers, cookies=cookies_dict)
-                        
-                        if fallback_response.status_code == 200:
-                            fallback_data = fallback_response.json()
-                            fallback_result = fallback_data.get("result", {})
-                            if isinstance(fallback_result, dict):
-                                projects = fallback_result.get("projects", [])
-                                logger.info(f"🔄 User {user_id}: Fallback found {len(projects)} projects")
-                        elif fallback_response.status_code == 401:
-                            logger.error(f"🔐 User {user_id}: Credentials expired in fallback")
-                            # Mark credentials as expired
-                            try:
-                                from database import SessionLocal
-                                from models import FreelancerCredentials
-                                
-                                db = SessionLocal()
-                                try:
-                                    credentials = db.query(FreelancerCredentials).filter(
-                                        FreelancerCredentials.user_id == user_id
-                                    ).first()
-                                    
-                                    if credentials:
-                                        credentials.is_validated = False
-                                        db.commit()
-                                finally:
-                                    db.close()
-                            except Exception as e:
-                                logger.error(f"❌ Failed to update credential status: {e}")
-                            return []
-                    
-                    return projects
-                        
-            finally:
-                db.close()
-                
-        except Exception as e:
-            logger.error(f"❌ Error fetching projects for User {user_id}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return []
+
 
     def _get_project_currency(self, project: Dict) -> str:
         """Extract currency from project data"""
@@ -900,11 +755,21 @@ class AutoBidder:
         max_bids = settings.get("max_project_bids", 50)
         supported_currencies = settings.get("currencies", ["USD"])
         min_skill_match = settings.get("min_skill_match", 1)
-        max_age_minutes = 10  # Only bid on projects posted within last 10 minutes for freshness
+        max_age_minutes = 15  # Only bid on projects posted within last 15 minutes for freshness
         
         filtered = []
         import time
         current_timestamp = time.time()
+
+        # Track filtering statistics
+        filter_stats = {
+            "total": len(projects),
+            "currency_rejected": 0,
+            "age_rejected": 0,
+            "skill_rejected": 0,
+            "bid_count_rejected": 0,
+            "passed": 0
+        }
 
         logger.info(f"🔍 Filter: Max bids: {max_bids}, Currencies: {supported_currencies}, Min skills: {min_skill_match}")
 
@@ -915,18 +780,21 @@ class AutoBidder:
             # 1. Check currency
             project_currency = self._get_project_currency(project)
             if project_currency not in supported_currencies:
+                filter_stats["currency_rejected"] += 1
                 continue
 
-            # 2. Check age - only fresh projects (≤10 minutes)
+            # 2. Check age - only fresh projects (≤15 minutes)
             time_submitted = project.get("time_submitted", 0)
             if time_submitted > 0:
                 age_minutes = (current_timestamp - time_submitted) / 60
                 if age_minutes > max_age_minutes:
+                    filter_stats["age_rejected"] += 1
                     continue
                 else:
                     posted_time = self._format_time_ago(time_submitted)
                     logger.info(f"✅ Fresh project: {posted_time} - {project_currency}")
             else:
+                filter_stats["age_rejected"] += 1
                 continue
 
             # 3. Check skill matching - ALWAYS ENFORCED
@@ -986,20 +854,36 @@ class AutoBidder:
                     skill_match_count = len(matching_skills)
                     
                     if skill_match_count < min_skill_match:
-                        logger.info(f"❌ Need {min_skill_match} skills, found {skill_match_count} - SKIPPING")
-                        continue
+                        # Check for 50% fallback - if found skills are more than 50% of required
+                        skill_match_percentage = (skill_match_count / min_skill_match) * 100
+                        if skill_match_percentage >= 50:
+                            logger.info(f"🔄 FALLBACK: Need {min_skill_match} skills, found {skill_match_count} ({skill_match_percentage:.0f}% ≥ 50%) - ALLOWING")
+                        else:
+                            logger.info(f"❌ Need {min_skill_match} skills, found {skill_match_count} ({skill_match_percentage:.0f}% < 50%) - SKIPPING")
+                            filter_stats["skill_rejected"] += 1
+                            continue
                     else:
                         logger.info(f"🎯 SKILL MATCH: {skill_match_count}/{min_skill_match}")
 
             # 4. Check bid count
             bid_count = project.get("bid_stats", {}).get("bid_count", 0)
             if bid_count > max_bids:
+                filter_stats["bid_count_rejected"] += 1
                 continue
 
             logger.info(f"🎯 Project PASSED all filters - adding to bid list")
             filtered.append(project)
+            filter_stats["passed"] += 1
         
+        # Enhanced logging with breakdown
         logger.info(f"🔍 Filter result: {len(filtered)}/{len(projects)} projects passed")
+        logger.info(f"📊 Filter breakdown:")
+        logger.info(f"   ✅ Passed all filters: {filter_stats['passed']}")
+        logger.info(f"   💰 Currency rejected: {filter_stats['currency_rejected']}")
+        logger.info(f"   ⏰ Age rejected (>15min): {filter_stats['age_rejected']}")
+        logger.info(f"   🎯 Skill rejected (<{min_skill_match} or <50%): {filter_stats['skill_rejected']}")
+        logger.info(f"   📈 Bid count rejected (>{max_bids}): {filter_stats['bid_count_rejected']}")
+        
         return filtered
 
     async def _generate_proposal(self, user_id: int, project: Dict, bid_amount: float) -> str:
