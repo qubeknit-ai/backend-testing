@@ -2128,10 +2128,15 @@ async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_
         if db is None:
             raise HTTPException(status_code=500, detail="Database connection failed")
         
-        from models import User, Lead
+        from models import User, Lead, BidHistory
+        from datetime import datetime, timedelta
         
         all_users = db.query(User).all()
         users_data = []
+        
+        # Calculate date ranges
+        today = datetime.utcnow().date()
+        week_ago = today - timedelta(days=7)
         
         for u in all_users:
             # Count total leads for this user
@@ -2141,6 +2146,33 @@ async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_
             approved_leads_count = db.query(Lead).filter(
                 Lead.user_id == u.id,
                 Lead.proposal_accepted == True
+            ).count()
+            
+            # Auto-bid statistics from bid_history
+            # Bids today
+            bids_today = db.query(BidHistory).filter(
+                BidHistory.user_id == u.id,
+                BidHistory.created_at >= datetime.combine(today, datetime.min.time())
+            ).count()
+            
+            # Bids this week
+            bids_week = db.query(BidHistory).filter(
+                BidHistory.user_id == u.id,
+                BidHistory.created_at >= datetime.combine(week_ago, datetime.min.time())
+            ).count()
+            
+            # Success today
+            success_today = db.query(BidHistory).filter(
+                BidHistory.user_id == u.id,
+                BidHistory.created_at >= datetime.combine(today, datetime.min.time()),
+                BidHistory.status == 'success'
+            ).count()
+            
+            # Success this week
+            success_week = db.query(BidHistory).filter(
+                BidHistory.user_id == u.id,
+                BidHistory.created_at >= datetime.combine(week_ago, datetime.min.time()),
+                BidHistory.status == 'success'
             ).count()
             
             users_data.append({
@@ -2153,6 +2185,10 @@ async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_
                 "freelancer_plus_fetch_count": u.freelancer_plus_fetch_count or 0,
                 "leads_count": leads_count,
                 "approved_leads_count": approved_leads_count,
+                "bids_today": bids_today,
+                "bids_week": bids_week,
+                "success_today": success_today,
+                "success_week": success_week,
                 "created_at": u.created_at.isoformat() if u.created_at else None
             })
         
