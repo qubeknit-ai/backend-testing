@@ -26,6 +26,92 @@ class AutoBidder:
             cls._instance = super(AutoBidder, cls).__new__(cls)
         return cls._instance
 
+    async def debug_skill_extraction(self, user_id: int, limit: int = 3):
+        """Debug function to test skill extraction from projects"""
+        logger.info("🔍 DEBUG: Testing skill extraction from projects...")
+        
+        projects = await self._fetch_projects_with_fallbacks(user_id)
+        
+        if not projects:
+            logger.info("❌ No projects found for skill extraction testing")
+            return
+        
+        logger.info(f"📊 Testing skill extraction on {min(limit, len(projects))} projects")
+        
+        for i, project in enumerate(projects[:limit]):
+            logger.info(f"\n🔍 PROJECT {i+1} SKILL EXTRACTION:")
+            logger.info(f"   Title: {project.get('title', 'Unknown')[:60]}...")
+            logger.info(f"   ID: {project.get('id')}")
+            
+            # Test enhanced skill extraction
+            extracted_skills = self._extract_project_skills(project)
+            
+            logger.info(f"   🎯 Extracted {len(extracted_skills)} skills:")
+            for skill in extracted_skills[:5]:  # Show first 5 skills
+                skill_id = skill.get("id", "No ID")
+                skill_name = skill.get("name", "No Name")
+                skill_category = skill.get("category", "No Category")
+                logger.info(f"      - ID: {skill_id}, Name: '{skill_name}', Category: {skill_category}")
+            
+            if len(extracted_skills) > 5:
+                logger.info(f"      ... and {len(extracted_skills) - 5} more skills")
+            
+            # Show raw project structure for comparison
+            logger.info(f"   📋 Raw project fields:")
+            if project.get("jobs"):
+                logger.info(f"      - jobs: {len(project['jobs'])} items")
+            if project.get("skills"):
+                logger.info(f"      - skills: {len(project['skills'])} items")
+            if project.get("categories"):
+                logger.info(f"      - categories: {len(project['categories'])} items")
+            if project.get("job_details"):
+                logger.info(f"      - job_details: {len(project['job_details'])} items")
+            
+            logger.info("   " + "─" * 60)
+        
+        logger.info("🔍 DEBUG: Skill extraction testing complete")
+
+    async def debug_user_skills(self, user_id: int):
+        """Debug function to check user's skills from Freelancer profile"""
+        logger.info(f"🔍 DEBUG: Checking User {user_id} skills from Freelancer profile...")
+        
+        try:
+            from database import SessionLocal
+            from models import FreelancerCredentials
+            
+            db = SessionLocal()
+            try:
+                credentials = db.query(FreelancerCredentials).filter(
+                    FreelancerCredentials.user_id == user_id,
+                    FreelancerCredentials.is_validated == True
+                ).first()
+                
+                if not credentials:
+                    logger.error(f"❌ No valid credentials found for User {user_id}")
+                    return
+                
+                headers = {"Content-Type": "application/json"}
+                cookies_dict = credentials.cookies if credentials.cookies else {}
+                
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    # Get user skills
+                    user_skills = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
+                    
+                    logger.info(f"✅ User {user_id} has {len(user_skills)} skills in profile:")
+                    logger.info(f"   Skill IDs: {user_skills}")
+                    
+                    # Also check selected skills from database
+                    if credentials.selected_skills:
+                        logger.info(f"   Selected skills in DB: {credentials.selected_skills}")
+                    else:
+                        logger.info(f"   No selected skills configured in database")
+                        
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Error debugging user skills: {e}")
+
     async def debug_project_structure(self, user_id: int, limit: int = 5):
         """Debug function to examine actual project structure from Freelancer API"""
         logger.info("🔍 DEBUG: Examining Freelancer API project structure...")
@@ -263,7 +349,7 @@ class AutoBidder:
                                 successful_bids += 1
                                 logger.info(f"✅ User {user_id}: Successful bid placed in parallel processing")
                             elif result == "BID_LIMIT_REACHED":
-                                logger.error(f"� User {usser_id}: Bid limit reached during parallel processing")
+                                logger.error(f"🚫 User {user_id}: Bid limit reached during parallel processing")
                                 self._handle_user_failure(user_id)
                             elif result == "CREDENTIALS_EXPIRED":
                                 logger.error(f"🔐 User {user_id}: Credentials expired during parallel processing")
@@ -499,7 +585,7 @@ class AutoBidder:
             
             if not filtered_projects:
                 min_skill_match = settings.get("min_skill_match", 1)
-                logger.info(f"� UUser {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, min skills: {min_skill_match}, max age: 15 minutes)")
+                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, min skills: {min_skill_match}, max age: 15 minutes)")
                 return False
 
             min_skill_match = settings.get("min_skill_match", 1)
@@ -608,7 +694,7 @@ class AutoBidder:
         return []
 
     async def _fetch_projects_strategy(self, user_id: int, strategy: str) -> List[Dict]:
-        """Fetch projects using specific strategy"""
+        """Fetch projects using specific strategy with enhanced skill validation"""
         try:
             from database import SessionLocal
             from models import FreelancerCredentials
@@ -635,9 +721,12 @@ class AutoBidder:
                         # Get user skills first
                         user_skills = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
                         if user_skills:
-                            skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
+                            # Use user's actual skill IDs for API call
+                            skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills[:10]])  # Limit to top 10 skills
                             url = f"{base_url}?{params}&{skills_params}&languages[]=en"
+                            logger.info(f"🎯 User {user_id}: Fetching projects for skill IDs: {user_skills[:10]}")
                         else:
+                            logger.warning(f"⚠️  User {user_id}: No skills found, falling back to general search")
                             return []
                     elif strategy == "recommended":
                         url = f"{base_url}?{params}&user_recommended=true"
@@ -654,10 +743,15 @@ class AutoBidder:
                         data = response.json()
                         result = data.get("result", {})
                         if isinstance(result, dict):
-                            return result.get("projects", [])
+                            projects = result.get("projects", [])
+                            logger.info(f"✅ User {user_id}: {strategy} strategy returned {len(projects)} projects")
+                            return projects
                     elif response.status_code == 401:
                         logger.error(f"🔐 User {user_id}: Credentials expired in {strategy} strategy")
+                        await self._mark_credentials_expired(user_id)
                         return []
+                    else:
+                        logger.warning(f"⚠️  User {user_id}: {strategy} strategy failed with status {response.status_code}")
                     
                     return []
                     
@@ -669,24 +763,308 @@ class AutoBidder:
             return []
 
     async def _get_user_skill_ids(self, user_id: int, client, headers: Dict, cookies_dict: Dict) -> List[int]:
-        """Get user skill IDs from profile"""
+        """Get user skill IDs from profile with enhanced extraction"""
         try:
-            user_profile_url = "https://www.freelancer.com/api/users/0.1/self?limit=1&jobs=true&webapp=1&compact=true"
+            # Get full user profile with all skill details
+            user_profile_url = "https://www.freelancer.com/api/users/0.1/self?jobs=true&job_details=true&webapp=1&compact=false"
             user_response = await client.get(user_profile_url, headers=headers, cookies=cookies_dict)
             
             if user_response.status_code == 200:
                 user_data = user_response.json()
                 user_profile = user_data.get("result", {})
                 
+                skill_ids = []
+                
+                # Extract from jobs field (primary skills)
                 if user_profile.get("jobs"):
-                    return [job["id"] for job in user_profile["jobs"]]
+                    for job in user_profile["jobs"]:
+                        if isinstance(job, dict) and job.get("id"):
+                            skill_ids.append(int(job["id"]))
+                        elif isinstance(job, int):
+                            skill_ids.append(job)
+                
+                # Also check for skills field (some profiles use this)
+                if user_profile.get("skills"):
+                    for skill in user_profile["skills"]:
+                        if isinstance(skill, dict) and skill.get("id"):
+                            skill_ids.append(int(skill["id"]))
+                        elif isinstance(skill, int):
+                            skill_ids.append(skill)
+                
+                # Remove duplicates and return
+                unique_skill_ids = list(set(skill_ids))
+                logger.info(f"✅ User {user_id}: Found {len(unique_skill_ids)} skill IDs from profile: {unique_skill_ids}")
+                return unique_skill_ids
             
+            elif user_response.status_code == 401:
+                logger.error(f"🔐 User {user_id}: Credentials expired while getting skills")
+                return []
+            
+            logger.warning(f"⚠️  User {user_id}: Failed to get user skills - status {user_response.status_code}")
             return []
+            
         except Exception as e:
             logger.error(f"❌ Error getting user skills for User {user_id}: {e}")
             return []
 
 
+
+    def _extract_project_skills(self, project: Dict) -> List[Dict]:
+        """Enhanced skill extraction from project data with multiple fallback methods"""
+        extracted_skills = []
+        
+        # Method 1: Extract from 'jobs' field (most common)
+        if project.get("jobs"):
+            jobs = project["jobs"]
+            if isinstance(jobs, list):
+                for job in jobs:
+                    if isinstance(job, dict):
+                        skill_info = {
+                            "id": job.get("id"),
+                            "name": (job.get("name") or job.get("job_name") or 
+                                   job.get("title") or job.get("skill_name") or job.get("label")),
+                            "category": job.get("category"),
+                            "expertise_level": job.get("expertise_level")
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+                    elif isinstance(job, str):
+                        extracted_skills.append({"id": None, "name": job, "category": None})
+        
+        # Method 2: Extract from 'skills' field (alternative structure)
+        if project.get("skills"):
+            skills = project["skills"]
+            if isinstance(skills, list):
+                for skill in skills:
+                    if isinstance(skill, dict):
+                        skill_info = {
+                            "id": skill.get("id") or skill.get("skill_id"),
+                            "name": (skill.get("name") or skill.get("skill_name") or 
+                                   skill.get("title") or skill.get("label")),
+                            "category": skill.get("category")
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+                    elif isinstance(skill, str):
+                        extracted_skills.append({"id": None, "name": skill, "category": None})
+        
+        # Method 3: Extract from 'categories' field
+        if project.get("categories"):
+            categories = project["categories"]
+            if isinstance(categories, list):
+                for category in categories:
+                    if isinstance(category, dict):
+                        skill_info = {
+                            "id": category.get("id"),
+                            "name": category.get("name") or category.get("category_name"),
+                            "category": "category"
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+        
+        # Method 4: Extract from 'job_details' field (detailed structure)
+        if project.get("job_details"):
+            job_details = project["job_details"]
+            if isinstance(job_details, list):
+                for detail in job_details:
+                    if isinstance(detail, dict):
+                        skill_info = {
+                            "id": detail.get("job_id") or detail.get("id"),
+                            "name": detail.get("job_name") or detail.get("name"),
+                            "category": detail.get("category")
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+        
+        # Method 5: Extract from 'required_skills' field
+        if project.get("required_skills"):
+            req_skills = project["required_skills"]
+            if isinstance(req_skills, list):
+                for skill in req_skills:
+                    if isinstance(skill, dict):
+                        skill_info = {
+                            "id": skill.get("id"),
+                            "name": skill.get("name"),
+                            "required": True
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+        
+        # Remove duplicates based on ID or name
+        unique_skills = []
+        seen_ids = set()
+        seen_names = set()
+        
+        for skill in extracted_skills:
+            skill_id = skill.get("id")
+            skill_name = skill.get("name")
+            
+            if skill_id and skill_id not in seen_ids:
+                seen_ids.add(skill_id)
+                unique_skills.append(skill)
+            elif skill_name and skill_name.lower().strip() not in seen_names and not skill_id:
+                seen_names.add(skill_name.lower().strip())
+                unique_skills.append(skill)
+        
+        return unique_skills
+        """Extract currency from project data"""
+        budget = project.get("budget", {})
+        
+        # Method 1: Check budget.currency
+        if budget.get("currency"):
+            if isinstance(budget["currency"], str):
+                return budget["currency"]
+            elif isinstance(budget["currency"], dict):
+                if budget["currency"].get("code"):
+                    return budget["currency"]["code"]
+                elif budget["currency"].get("id"):
+                    # Freelancer API currency mapping based on common IDs
+                    currency_map = {
+                        1: 'USD', 2: 'EUR', 3: 'GBP', 4: 'AUD', 5: 'CAD', 6: 'INR', 7: 'JPY', 8: 'CNY',
+                        9: 'BRL', 10: 'MXN', 11: 'ZAR', 12: 'SGD', 13: 'NZD', 14: 'HKD', 15: 'SEK',
+                        16: 'NOK', 17: 'DKK', 18: 'PLN', 19: 'CHF', 20: 'RUB', 21: 'TRY', 22: 'THB',
+                        23: 'PHP', 24: 'IDR', 25: 'MYR', 26: 'VND', 27: 'KRW', 28: 'AED', 29: 'SAR',
+                        30: 'PKR', 31: 'BDT', 32: 'NGN', 33: 'EGP', 34: 'ARS', 35: 'CLP', 36: 'COP',
+                        37: 'PEN', 38: 'UAH', 39: 'ILS', 40: 'CZK', 41: 'HUF', 42: 'RON'
+                    }
+                    return currency_map.get(budget["currency"]["id"], "USD")
+        
+        # Method 2: Check budget.currency_id
+        if budget.get("currency_id"):
+            currency_map = {
+                1: 'USD', 2: 'EUR', 3: 'GBP', 4: 'AUD', 5: 'CAD', 6: 'INR', 7: 'JPY', 8: 'CNY',
+                28: 'AED'  # Added AED mapping
+            }
+            return currency_map.get(budget["currency_id"], "USD")
+        
+        # Method 3: Check project-level currency fields
+        if project.get("currency"):
+            if isinstance(project["currency"], str):
+                return project["currency"]
+            elif isinstance(project["currency"], dict) and project["currency"].get("code"):
+                return project["currency"]["code"]
+        
+        # Method 4: Try to detect from client location as fallback
+        if project.get("owner"):
+            client_country = None
+            if project["owner"].get("location", {}).get("country", {}).get("code"):
+                client_country = project["owner"]["location"]["country"]["code"]
+            elif project["owner"].get("country", {}).get("code"):
+                client_country = project["owner"]["country"]["code"]
+            
+            if client_country:
+                country_currency_map = {
+                    'GB': 'GBP', 'UK': 'GBP', 'CA': 'CAD', 'AU': 'AUD', 'IN': 'INR',
+                    'JP': 'JPY', 'CN': 'CNY', 'BR': 'BRL', 'MX': 'MXN', 'ZA': 'ZAR',
+                    'SG': 'SGD', 'NZ': 'NZD', 'HK': 'HKD', 'SE': 'SEK', 'NO': 'NOK',
+                    'DK': 'DKK', 'PL': 'PLN', 'CH': 'CHF', 'RU': 'RUB', 'TR': 'TRY',
+                    'TH': 'THB', 'PH': 'PHP', 'ID': 'IDR', 'MY': 'MYR', 'VN': 'VND',
+                    'KR': 'KRW', 'AE': 'AED', 'SA': 'SAR', 'PK': 'PKR', 'BD': 'BDT',
+                    'NG': 'NGN', 'EG': 'EGP'
+                }
+                return country_currency_map.get(client_country, "USD")
+        
+        # Default fallback
+        return "USD"
+
+    def _extract_project_skills(self, project: Dict) -> List[Dict]:
+        """Enhanced skill extraction from project data with multiple fallback methods"""
+        extracted_skills = []
+        
+        # Method 1: Extract from 'jobs' field (most common)
+        if project.get("jobs"):
+            jobs = project["jobs"]
+            if isinstance(jobs, list):
+                for job in jobs:
+                    if isinstance(job, dict):
+                        skill_info = {
+                            "id": job.get("id"),
+                            "name": (job.get("name") or job.get("job_name") or 
+                                   job.get("title") or job.get("skill_name") or job.get("label")),
+                            "category": job.get("category"),
+                            "expertise_level": job.get("expertise_level")
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+                    elif isinstance(job, str):
+                        extracted_skills.append({"id": None, "name": job, "category": None})
+        
+        # Method 2: Extract from 'skills' field (alternative structure)
+        if project.get("skills"):
+            skills = project["skills"]
+            if isinstance(skills, list):
+                for skill in skills:
+                    if isinstance(skill, dict):
+                        skill_info = {
+                            "id": skill.get("id") or skill.get("skill_id"),
+                            "name": (skill.get("name") or skill.get("skill_name") or 
+                                   skill.get("title") or skill.get("label")),
+                            "category": skill.get("category")
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+                    elif isinstance(skill, str):
+                        extracted_skills.append({"id": None, "name": skill, "category": None})
+        
+        # Method 3: Extract from 'categories' field
+        if project.get("categories"):
+            categories = project["categories"]
+            if isinstance(categories, list):
+                for category in categories:
+                    if isinstance(category, dict):
+                        skill_info = {
+                            "id": category.get("id"),
+                            "name": category.get("name") or category.get("category_name"),
+                            "category": "category"
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+        
+        # Method 4: Extract from 'job_details' field (detailed structure)
+        if project.get("job_details"):
+            job_details = project["job_details"]
+            if isinstance(job_details, list):
+                for detail in job_details:
+                    if isinstance(detail, dict):
+                        skill_info = {
+                            "id": detail.get("job_id") or detail.get("id"),
+                            "name": detail.get("job_name") or detail.get("name"),
+                            "category": detail.get("category")
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+        
+        # Method 5: Extract from 'required_skills' field
+        if project.get("required_skills"):
+            req_skills = project["required_skills"]
+            if isinstance(req_skills, list):
+                for skill in req_skills:
+                    if isinstance(skill, dict):
+                        skill_info = {
+                            "id": skill.get("id"),
+                            "name": skill.get("name"),
+                            "required": True
+                        }
+                        if skill_info["id"] or skill_info["name"]:
+                            extracted_skills.append(skill_info)
+        
+        # Remove duplicates based on ID or name
+        unique_skills = []
+        seen_ids = set()
+        seen_names = set()
+        
+        for skill in extracted_skills:
+            skill_id = skill.get("id")
+            skill_name = skill.get("name")
+            
+            if skill_id and skill_id not in seen_ids:
+                seen_ids.add(skill_id)
+                unique_skills.append(skill)
+            elif skill_name and skill_name.lower().strip() not in seen_names and not skill_id:
+                seen_names.add(skill_name.lower().strip())
+                unique_skills.append(skill)
+        
+        return unique_skills
 
     def _get_project_currency(self, project: Dict) -> str:
         """Extract currency from project data"""
@@ -749,6 +1127,67 @@ class AutoBidder:
         # Default fallback
         return "USD"
 
+    async def _validate_user_skills_for_project(self, user_id: int, project: Dict) -> bool:
+        """Validate if user has required skills for the project before bidding"""
+        try:
+            from database import SessionLocal
+            from models import FreelancerCredentials
+            
+            db = SessionLocal()
+            try:
+                credentials = db.query(FreelancerCredentials).filter(
+                    FreelancerCredentials.user_id == user_id,
+                    FreelancerCredentials.is_validated == True
+                ).first()
+                
+                if not credentials:
+                    logger.warning(f"⚠️  User {user_id}: No valid credentials for skill validation")
+                    return False
+                
+                # Get user's actual skills from Freelancer profile
+                headers = {"Content-Type": "application/json"}
+                cookies_dict = credentials.cookies if credentials.cookies else {}
+                
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    user_skills = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
+                    
+                    if not user_skills:
+                        logger.warning(f"⚠️  User {user_id}: No skills found in profile")
+                        return False
+                    
+                    # Extract project skills using enhanced method
+                    project_skills = self._extract_project_skills(project)
+                    
+                    if not project_skills:
+                        logger.info(f"✅ User {user_id}: No specific skills required for project - allowing bid")
+                        return True
+                    
+                    # Check if user has any of the required skills (by ID)
+                    project_skill_ids = [skill.get("id") for skill in project_skills if skill.get("id")]
+                    
+                    if project_skill_ids:
+                        matching_skills = set(user_skills) & set(project_skill_ids)
+                        if matching_skills:
+                            logger.info(f"✅ User {user_id}: Has {len(matching_skills)} matching skill IDs: {matching_skills}")
+                            return True
+                        else:
+                            logger.warning(f"❌ User {user_id}: No matching skill IDs. User: {user_skills[:5]}..., Project: {project_skill_ids[:5]}...")
+                            return False
+                    else:
+                        # Fallback to name-based matching if no IDs available
+                        project_skill_names = [skill.get("name").lower() for skill in project_skills if skill.get("name")]
+                        
+                        # Get user skill names for comparison (would need additional API call)
+                        logger.info(f"ℹ️  User {user_id}: Using skill ID validation only (no name fallback)")
+                        return len(user_skills) > 0  # Allow if user has any skills
+                        
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Error validating skills for User {user_id}: {e}")
+            return True  # Allow bidding if validation fails (fail-safe)
+
     def _filter_projects(self, projects: List[Dict], settings: Dict, user_selected_skills: List[str] = None) -> List[Dict]:
         """Filter projects based on settings - focus on currency, freshness, and skill matching"""
         
@@ -797,48 +1236,24 @@ class AutoBidder:
                 filter_stats["age_rejected"] += 1
                 continue
 
-            # 3. Check skill matching - ALWAYS ENFORCED
+            # 3. Check skill matching - ENHANCED VERSION
             if min_skill_match > 0:
-                project_skills = []
-                
-                # Extract skills from project data
-                if project.get("jobs"):
-                    jobs = project["jobs"]
-                    if isinstance(jobs, list):
-                        for job in jobs:
-                            if isinstance(job, dict):
-                                skill_name = (job.get("name") or job.get("job_name") or 
-                                            job.get("title") or job.get("skill_name"))
-                                if skill_name:
-                                    project_skills.append(skill_name)
-                            elif isinstance(job, str):
-                                project_skills.append(job)
-                
-                # Other skill extraction methods...
-                if project.get("skills"):
-                    skills = project["skills"]
-                    if isinstance(skills, list):
-                        for skill in skills:
-                            if isinstance(skill, dict):
-                                skill_name = skill.get("name") or skill.get("skill_name")
-                                if skill_name:
-                                    project_skills.append(skill_name)
-                            elif isinstance(skill, str):
-                                project_skills.append(skill)
-                
+                # Use enhanced skill extraction
+                project_skills_data = self._extract_project_skills(project)
+                project_skills = [skill.get("name") for skill in project_skills_data if skill.get("name")]
                 project_skills = list(set([skill.strip() for skill in project_skills if skill and skill.strip()]))
                 
                 if not project_skills:
-                    logger.info(f"⚠️  No skills extracted - allowing project")
+                    logger.info(f"⚠️  No skills extracted from project - allowing (may be general project)")
                 elif not user_selected_skills:
-                    logger.info(f"✅ No skill filter - allowing project")
+                    logger.info(f"✅ No skill filter configured - allowing project")
                 else:
-                    # Perform skill matching
+                    # Perform enhanced skill matching
                     matching_skills = []
                     user_skills_lower = [skill.lower().strip() for skill in user_selected_skills]
                     project_skills_lower = [skill.lower().strip() for skill in project_skills]
                     
-                    # Exact match
+                    # Exact match first
                     for user_skill in user_selected_skills:
                         if user_skill in project_skills:
                             matching_skills.append(user_skill)
@@ -851,19 +1266,32 @@ class AutoBidder:
                                     matching_skills.append(user_selected_skills[i])
                                     break
                     
-                    skill_match_count = len(matching_skills)
+                    # Partial/substring matching as fallback
+                    if not matching_skills:
+                        for user_skill in user_selected_skills:
+                            user_skill_lower = user_skill.lower().strip()
+                            for project_skill in project_skills:
+                                project_skill_lower = project_skill.lower().strip()
+                                if (user_skill_lower in project_skill_lower or 
+                                    project_skill_lower in user_skill_lower):
+                                    matching_skills.append(user_skill)
+                                    break
+                    
+                    skill_match_count = len(set(matching_skills))  # Remove duplicates
                     
                     if skill_match_count < min_skill_match:
-                        # Check for 50% fallback - if found skills are more than 50% of required
+                        # Check for 50% fallback
                         skill_match_percentage = (skill_match_count / min_skill_match) * 100
                         if skill_match_percentage >= 50:
                             logger.info(f"🔄 FALLBACK: Need {min_skill_match} skills, found {skill_match_count} ({skill_match_percentage:.0f}% ≥ 50%) - ALLOWING")
                         else:
-                            logger.info(f"❌ Need {min_skill_match} skills, found {skill_match_count} ({skill_match_percentage:.0f}% < 50%) - SKIPPING")
+                            logger.info(f"❌ SKILL MISMATCH: Need {min_skill_match}, found {skill_match_count} ({skill_match_percentage:.0f}% < 50%)")
+                            logger.info(f"   User skills: {user_selected_skills[:3]}...")
+                            logger.info(f"   Project skills: {project_skills[:3]}...")
                             filter_stats["skill_rejected"] += 1
                             continue
                     else:
-                        logger.info(f"🎯 SKILL MATCH: {skill_match_count}/{min_skill_match}")
+                        logger.info(f"🎯 SKILL MATCH: {skill_match_count}/{min_skill_match} - {matching_skills[:2]}...")
 
             # 4. Check bid count
             bid_count = project.get("bid_stats", {}).get("bid_count", 0)
@@ -1088,19 +1516,9 @@ class AutoBidder:
                     error_message = response_data.get("message", "Unknown error")
                     logger.error(f"❌ User {user_id}: Freelancer returned error: {error_message}")
                     
-                    # Check if it's "already bid" error - save to history to avoid retry
+                    # Check if it's "already bid" error - DON'T save to history, just return
                     if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
-                        logger.info(f"⏭️  User {user_id}: Already bid error detected, saving to history...")
-                        await self._save_bid_history({
-                            "user_id": user_id,
-                            "project_id": str(project_id),
-                            "project_title": title,
-                            "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
-                            "bid_amount": bid_amount,
-                            "proposal_text": proposal,
-                            "status": "already_bid",
-                            "error_message": error_message
-                        })
+                        logger.info(f"⏭️  User {user_id}: Already bid error detected, skipping to next project (not saving to history)")
                         return "ALREADY_BID"
                     
                     # Save other errors to history to avoid retry
@@ -1152,17 +1570,7 @@ class AutoBidder:
             
             # Check for specific error types
             if "already bid" in error_message.lower() or "you have already bid" in error_message.lower():
-                logger.info(f"⏭️  User {user_id}: Already bid error detected, saving to history...")
-                await self._save_bid_history({
-                    "user_id": user_id,
-                    "project_id": str(project_id),
-                    "project_title": title,
-                    "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
-                    "bid_amount": bid_amount,
-                    "proposal_text": proposal,
-                    "status": "already_bid",
-                    "error_message": error_message
-                })
+                logger.info(f"⏭️  User {user_id}: Already bid error detected, skipping to next project (not saving to history)")
                 return "ALREADY_BID"
             
             if "used all of your bids" in error_message.lower() or "you have used all your bids" in error_message.lower() or "daily limit" in error_message.lower():
@@ -1170,7 +1578,7 @@ class AutoBidder:
                 await self._disable_user_autobidding(user_id)
                 return "BID_LIMIT_REACHED"
             
-            # Save ALL other errors to history to prevent retry
+            # Save ALL other errors to history to prevent retry (but NOT already_bid errors)
             await self._save_bid_history({
                 "user_id": user_id,
                 "project_id": str(project_id),
@@ -1226,12 +1634,32 @@ class AutoBidder:
             logger.error(f"❌ Failed to disable auto-bidding: {e}")
 
     async def _bid_on_project(self, user_id: int, project: Dict, settings: Dict):
-        """Place a REAL bid on Freelancer.com with AI-generated proposal"""
+        """Place a REAL bid on Freelancer.com with AI-generated proposal and skill validation"""
         logger.info(f"\n💼 User {user_id}: BIDDING ON PROJECT")
         
         try:
             title = project.get("title", "Unknown")
             project_id = project.get("id")
+            
+            # Step 0: Validate user has required skills for this project
+            logger.info(f"🔍 User {user_id}: Validating skills for project...")
+            if not await self._validate_user_skills_for_project(user_id, project):
+                logger.error(f"❌ User {user_id}: SKILL VALIDATION FAILED - User doesn't have required skills for this project")
+                
+                # Save to bid history to prevent retry
+                await self._save_bid_history({
+                    "user_id": user_id,
+                    "project_id": str(project_id),
+                    "project_title": title,
+                    "project_url": f"https://www.freelancer.com/projects/{project.get('seo_url', project_id)}",
+                    "bid_amount": 0,
+                    "proposal_text": "Skill validation failed",
+                    "status": "skill_validation_failed",
+                    "error_message": "User doesn't have required skills for this project"
+                })
+                return "SKILL_VALIDATION_FAILED"
+            
+            logger.info(f"✅ User {user_id}: Skill validation passed")
             
             # Calculate bid amount FIRST
             budget = project.get("budget", {})
