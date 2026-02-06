@@ -2258,7 +2258,7 @@ async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_
         if db is None:
             raise HTTPException(status_code=500, detail="Database connection failed")
         
-        from models import User, Lead, BidHistory
+        from models import User, Lead, BidHistory, ClosedDeal
         from datetime import datetime, timedelta
         
         all_users = db.query(User).all()
@@ -2305,6 +2305,12 @@ async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_
                 BidHistory.status == 'success'
             ).count()
             
+            # Profit from CRM (closed deals)
+            total_profit = db.query(func.sum(ClosedDeal.profit)).filter(
+                ClosedDeal.user_id == u.id,
+                ClosedDeal.status.in_(['active', 'completed'])
+            ).scalar() or 0
+            
             users_data.append({
                 "id": u.id,
                 "email": u.email,
@@ -2319,6 +2325,7 @@ async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_
                 "bids_week": bids_week,
                 "success_today": success_today,
                 "success_week": success_week,
+                "total_profit": float(total_profit),
                 "created_at": u.created_at.isoformat() if u.created_at else None
             })
         
