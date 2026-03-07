@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timedelta
 import random
 import json
+import time
 from playwright.async_api import async_playwright
 from typing import Optional, Dict, Any, List
 import httpx
@@ -19,12 +20,74 @@ class AutoBidder:
     _user_retry_count = {}    # Track retry attempts per user
     _user_backoff_until = {}  # Track backoff periods per user
     
+    # PERFORMANCE: Add caching
+    _settings_cache = {}  # Cache user settings
+    _settings_cache_time = {}  # Cache timestamps
+    _bid_history_cache = {}  # Cache bid history per user
+    _bid_history_cache_time = {}  # Cache timestamps
+    _http_client = None  # Reusable HTTP client
+    
     # Removed global settings - now using per-user settings from database
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(AutoBidder, cls).__new__(cls)
         return cls._instance
+
+    async def _get_http_client(self):
+        """PERFORMANCE: Get or create reusable HTTP client with connection pooling"""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
+                # Removed http2=True to avoid dependency issues
+            )
+        return self._http_client
+
+    async def _get_cached_bid_history(self, user_id: int) -> set:
+        """PERFORMANCE: Get cached bid history to avoid repeated DB queries"""
+        now = time.time()
+        cache_ttl = 300  # 5 minutes cache
+        
+        # Check if cache is valid
+        if (user_id in self._bid_history_cache and 
+            now - self._bid_history_cache_time.get(user_id, 0) < cache_ttl):
+            return self._bid_history_cache[user_id]
+        
+        # Fetch from database
+        try:
+            from database import SessionLocal
+            from models import BidHistory
+            
+            db = SessionLocal()
+            try:
+                # Fetch all project IDs user has bid on (much faster than checking one by one)
+                bid_history_ids = db.query(BidHistory.project_id).filter(
+                    BidHistory.user_id == user_id
+                ).all()
+                
+                # Convert to set for O(1) lookup
+                bid_history_set = {str(pid[0]) for pid in bid_history_ids}
+                
+                # Cache it
+                self._bid_history_cache[user_id] = bid_history_set
+                self._bid_history_cache_time[user_id] = now
+                
+                logger.info(f"📦 User {user_id}: Cached {len(bid_history_set)} bid history entries")
+                return bid_history_set
+                
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"❌ Error fetching bid history cache for User {user_id}: {e}")
+            return set()
+
+    def _invalidate_bid_history_cache(self, user_id: int):
+        """PERFORMANCE: Invalidate cache when new bid is placed"""
+        if user_id in self._bid_history_cache:
+            del self._bid_history_cache[user_id]
+        if user_id in self._bid_history_cache_time:
+            del self._bid_history_cache_time[user_id]
 
     async def debug_skill_extraction(self, user_id: int, limit: int = 3):
         """Debug function to test skill extraction from projects"""
@@ -282,9 +345,16 @@ class AutoBidder:
         consecutive_empty_cycles = 0
         last_successful_bid_time = None
         cycle_count = 0
+        last_heartbeat_time = time.time()  # Track last heartbeat
         
         while self._is_running:
             try:
+                # HEARTBEAT: Log every 2 minutes to prevent serverless timeout
+                current_time = time.time()
+                if current_time - last_heartbeat_time >= 120:  # 2 minutes = 120 seconds
+                    logger.info(f"💓 AutoBidder heartbeat - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Service running normally")
+                    last_heartbeat_time = current_time
+                
                 db = SessionLocal()
                 
                 try:
@@ -391,16 +461,13 @@ class AutoBidder:
                 # but don't check too often to waste resources
                 if enabled_settings:
                     min_frequency_minutes = min(setting.frequency_minutes for setting in enabled_settings)
-                    # Wait for 1/2 of the minimum frequency, but at least 1 minute, max 5 minutes
-                    smart_wait_minutes = max(1, min(5, min_frequency_minutes / 2))
+                    # Wait for 1/2 of the minimum frequency, but at least 2 minutes, max 5 minutes
+                    smart_wait_minutes = max(2, min(5, min_frequency_minutes / 2))
                     wait_seconds = int(smart_wait_minutes * 60)
                     logger.info(f"✅ Parallel cycle complete for users {active_users}. Next check in {smart_wait_minutes} minutes ({wait_seconds}s) - min user frequency: {min_frequency_minutes}m")
                 else:
-                    wait_seconds = 60  # Check every 60 seconds if no users enabled
+                    wait_seconds = 120  # Check every 120 seconds if no users enabled
                     logger.info(f"✅ No enabled users. Waiting {wait_seconds} seconds...")
-                
-                # Add heartbeat log every cycle to prevent serverless timeout
-                logger.info(f"💓 AutoBidder heartbeat - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Parallel service running normally")
                 
                 await asyncio.sleep(wait_seconds)
                 
@@ -476,24 +543,12 @@ class AutoBidder:
             logger.error(f"❌ Error cleaning up bid history for User {user_id}: {e}")
 
     async def _has_bid_history(self, user_id: int, project_id: str) -> bool:
-        """Check if user has already attempted to bid on this project"""
+        """PERFORMANCE: Check if user has already attempted to bid on this project (using cache)"""
+        # This method is now deprecated in favor of batch checking in _run_bid_cycle
+        # Kept for backward compatibility
         try:
-            from database import SessionLocal
-            from models import BidHistory
-            
-            db = SessionLocal()
-            try:
-                # Check if there's any bid history for this user and project
-                existing_bid = db.query(BidHistory).filter(
-                    BidHistory.user_id == user_id,
-                    BidHistory.project_id == project_id
-                ).first()
-                
-                return existing_bid is not None
-                
-            finally:
-                db.close()
-                
+            bid_history_set = await self._get_cached_bid_history(user_id)
+            return project_id in bid_history_set
         except Exception as e:
             logger.error(f"❌ Error checking bid history for User {user_id}, Project {project_id}: {e}")
             return False  # If we can't check, allow bidding (fail-safe)
@@ -549,8 +604,13 @@ class AutoBidder:
             # 0.1. Clean up old bid history (once per cycle)
             await self._cleanup_old_bid_history(user_id, days_to_keep=7)
             
+            # PERFORMANCE: Fetch bid history ONCE at start (instead of per-project)
+            bid_history_set = await self._get_cached_bid_history(user_id)
+            logger.info(f"📦 User {user_id}: Loaded {len(bid_history_set)} bid history entries from cache")
+            
             # 0.5. Get user's selected skills from database
             user_selected_skills = []
+            user_selected_skill_ids = []  # Also get skill IDs for matching
             try:
                 from database import SessionLocal
                 from models import FreelancerCredentials
@@ -564,6 +624,15 @@ class AutoBidder:
                     if credentials and credentials.selected_skills:
                         user_selected_skills = credentials.selected_skills
                         logger.info(f"🎯 User {user_id}: Found {len(user_selected_skills)} selected skills: {user_selected_skills}")
+                        
+                        # Also get the skill IDs from the user's profile for ID-based matching
+                        headers = {"Content-Type": "application/json"}
+                        cookies_dict = credentials.cookies if credentials.cookies else {}
+                        
+                        client = await self._get_http_client()
+                        user_skill_ids = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
+                        user_selected_skill_ids = user_skill_ids
+                        logger.info(f"🎯 User {user_id}: Found {len(user_selected_skill_ids)} skill IDs: {user_selected_skill_ids}")
                     else:
                         logger.info(f"ℹ️  User {user_id}: No selected skills found, will use all profile skills")
                 finally:
@@ -585,7 +654,7 @@ class AutoBidder:
             logger.info(f"📥 User {user_id}: Processing all {len(projects_to_process)} projects (filtering by bid history)")
 
             # 2. Filter projects by criteria for THIS user (including freshness check and skill matching)
-            filtered_projects = self._filter_projects(projects_to_process, settings, user_selected_skills)
+            filtered_projects = self._filter_projects(projects_to_process, settings, user_selected_skills, user_selected_skill_ids)
             
             if not filtered_projects:
                 min_skill_match = settings.get("min_skill_match", 1)
@@ -603,16 +672,15 @@ class AutoBidder:
                 logger.info(f"📅 User {user_id}: {len(filtered_projects)} fresh projects sorted by newest first")
             
             # 4. Try to bid on projects in order (newest first) until one succeeds
-            # Check bid history to avoid re-bidding on same projects
+            # PERFORMANCE: Check bid history using in-memory set (O(1) lookup instead of DB query)
             for project in filtered_projects:
                 project_id = str(project.get("id"))
                 project_title = project.get("title", "Unknown")[:50]
                 
-                # Check if we've already attempted to bid on this project
-                if await self._has_bid_history(user_id, project_id):
+                # PERFORMANCE: Check in-memory set instead of database query
+                if project_id in bid_history_set:
                     logger.info(f"⏭️  User {user_id}: Skipping '{project_title}...' - Already attempted (in bid history)")
                     continue  # Move to next project
-                    continue
                 
                 # Log project details before attempting bid
                 time_submitted = project.get("time_submitted", 0)
@@ -627,6 +695,9 @@ class AutoBidder:
                     bid_result = await self._bid_on_project(user_id, project, settings)
                     if bid_result == True:
                         logger.info(f"✅ User {user_id}: Successfully placed bid on fresh project!")
+                        
+                        # PERFORMANCE: Invalidate cache after successful bid
+                        self._invalidate_bid_history_cache(user_id)
                         
                         # Check if we've now reached the daily limit after this successful bid
                         if not await self._check_daily_bid_limit(user_id, settings):
@@ -674,31 +745,42 @@ class AutoBidder:
             return False
 
     async def _fetch_projects_with_fallbacks(self, user_id: int) -> List[Dict]:
-        """Fetch projects with multiple API endpoint fallbacks"""
+        """PERFORMANCE: Fetch projects with multiple API endpoint fallbacks (optimized order and timeouts)"""
         
-        # Try multiple API strategies
+        # PERFORMANCE: Try fastest/most reliable strategies first
         strategies = [
-            ("skill_based", "Projects matching user skills"),
-            ("recommended", "Recommended projects"),
-            ("recent_all", "All recent projects"),
-            ("popular", "Popular projects")
+            ("recent_all", "All recent projects", 15),      # Fastest, no filtering - 15s timeout
+            ("skill_based", "Projects matching user skills", 20),  # More specific - 20s timeout
+            ("recommended", "Recommended projects", 15),    # Medium speed - 15s timeout
+            ("popular", "Popular projects", 15)             # Fallback - 15s timeout
         ]
         
-        for strategy, description in strategies:
-            logger.info(f"🔍 User {user_id}: Trying {description}...")
-            projects = await self._fetch_projects_strategy(user_id, strategy)
-            
-            if projects and len(projects) > 0:
-                logger.info(f"✅ User {user_id}: {description} returned {len(projects)} projects")
-                return projects
-            else:
-                logger.info(f"❌ User {user_id}: {description} returned no projects")
+        for strategy, description, timeout in strategies:
+            logger.info(f"🔍 User {user_id}: Trying {description} (timeout: {timeout}s)...")
+            try:
+                # PERFORMANCE: Add timeout per strategy to fail fast
+                projects = await asyncio.wait_for(
+                    self._fetch_projects_strategy(user_id, strategy),
+                    timeout=timeout
+                )
+                
+                if projects and len(projects) > 0:
+                    logger.info(f"✅ User {user_id}: {description} returned {len(projects)} projects")
+                    return projects
+                else:
+                    logger.info(f"❌ User {user_id}: {description} returned no projects")
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️  User {user_id}: {description} timed out after {timeout}s")
+                continue
+            except Exception as e:
+                logger.error(f"❌ User {user_id}: {description} failed: {e}")
+                continue
         
         logger.warning(f"⚠️  User {user_id}: All API strategies failed")
         return []
 
     async def _fetch_projects_strategy(self, user_id: int, strategy: str) -> List[Dict]:
-        """Fetch projects using specific strategy with enhanced skill validation"""
+        """PERFORMANCE: Fetch projects using specific strategy (using reusable HTTP client)"""
         try:
             from database import SessionLocal
             from models import FreelancerCredentials
@@ -716,48 +798,50 @@ class AutoBidder:
                 headers = {"Content-Type": "application/json"}
                 cookies_dict = credentials.cookies if credentials.cookies else {}
                 
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    # Build URL based on strategy
-                    base_url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
-                    params = "compact=false&limit=20&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc"
-                    
-                    if strategy == "skill_based":
-                        # Get user skills first
-                        user_skills = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
-                        if user_skills:
-                            # Use user's actual skill IDs for API call
-                            skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills[:10]])  # Limit to top 10 skills
-                            url = f"{base_url}?{params}&{skills_params}&languages[]=en"
-                            logger.info(f"🎯 User {user_id}: Fetching projects for skill IDs: {user_skills[:10]}")
-                        else:
-                            logger.warning(f"⚠️  User {user_id}: No skills found, falling back to general search")
-                            return []
-                    elif strategy == "recommended":
-                        url = f"{base_url}?{params}&user_recommended=true"
-                    elif strategy == "recent_all":
-                        url = f"{base_url}?{params}"
-                    elif strategy == "popular":
-                        url = f"{base_url}?{params}&sort_field=bid_count&sort_order=asc"  # Fewer bids = less competitive
+                # PERFORMANCE: Use reusable HTTP client instead of creating new one
+                client = await self._get_http_client()
+                
+                # Build URL based on strategy
+                base_url = "https://www.freelancer.com/api/projects/0.1/projects/active/"
+                params = "compact=false&limit=20&user_details=true&jobs=true&job_details=true&full_description=true&sort_field=time_submitted&sort_order=desc"
+                
+                if strategy == "skill_based":
+                    # Get user skills first
+                    user_skills = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
+                    if user_skills:
+                        # Use user's actual skill IDs for API call
+                        skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills[:10]])  # Limit to top 10 skills
+                        url = f"{base_url}?{params}&{skills_params}&languages[]=en"
+                        logger.info(f"🎯 User {user_id}: Fetching projects for skill IDs: {user_skills[:10]}")
                     else:
+                        logger.warning(f"⚠️  User {user_id}: No skills found, falling back to general search")
                         return []
-                    
-                    response = await client.get(url, headers=headers, cookies=cookies_dict)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        result = data.get("result", {})
-                        if isinstance(result, dict):
-                            projects = result.get("projects", [])
-                            logger.info(f"✅ User {user_id}: {strategy} strategy returned {len(projects)} projects")
-                            return projects
-                    elif response.status_code == 401:
-                        logger.error(f"🔐 User {user_id}: Credentials expired in {strategy} strategy")
-                        await self._mark_credentials_expired(user_id)
-                        return []
-                    else:
-                        logger.warning(f"⚠️  User {user_id}: {strategy} strategy failed with status {response.status_code}")
-                    
+                elif strategy == "recommended":
+                    url = f"{base_url}?{params}&user_recommended=true"
+                elif strategy == "recent_all":
+                    url = f"{base_url}?{params}"
+                elif strategy == "popular":
+                    url = f"{base_url}?{params}&sort_field=bid_count&sort_order=asc"  # Fewer bids = less competitive
+                else:
                     return []
+                
+                response = await client.get(url, headers=headers, cookies=cookies_dict)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    result = data.get("result", {})
+                    if isinstance(result, dict):
+                        projects = result.get("projects", [])
+                        logger.info(f"✅ User {user_id}: {strategy} strategy returned {len(projects)} projects")
+                        return projects
+                elif response.status_code == 401:
+                    logger.error(f"🔐 User {user_id}: Credentials expired in {strategy} strategy")
+                    await self._mark_credentials_expired(user_id)
+                    return []
+                else:
+                    logger.warning(f"⚠️  User {user_id}: {strategy} strategy failed with status {response.status_code}")
+                
+                return []
                     
             finally:
                 db.close()
@@ -1192,7 +1276,7 @@ class AutoBidder:
             logger.error(f"❌ Error validating skills for User {user_id}: {e}")
             return True  # Allow bidding if validation fails (fail-safe)
 
-    def _filter_projects(self, projects: List[Dict], settings: Dict, user_selected_skills: List[str] = None) -> List[Dict]:
+    def _filter_projects(self, projects: List[Dict], settings: Dict, user_selected_skills: List[str] = None, user_selected_skill_ids: List[int] = None) -> List[Dict]:
         """Filter projects based on settings - focus on currency, freshness, and skill matching"""
         
         max_bids = settings.get("max_project_bids", 50)
@@ -1215,6 +1299,8 @@ class AutoBidder:
         }
 
         logger.info(f"🔍 Filter: Max bids: {max_bids}, Currencies: {supported_currencies}, Min skills: {min_skill_match}")
+        if user_selected_skill_ids:
+            logger.info(f"🎯 User skill IDs for matching: {user_selected_skill_ids[:5]}...")
 
         for project in projects:
             project_id = project.get("id")
@@ -1251,46 +1337,58 @@ class AutoBidder:
                     filter_stats["commission_rejected"] += 1
                     continue
 
-            # 3. Check skill matching - ENHANCED VERSION
+            # 3. Check skill matching - ENHANCED VERSION with ID-based matching
             if min_skill_match > 0:
                 # Use enhanced skill extraction
                 project_skills_data = self._extract_project_skills(project)
-                project_skills = [skill.get("name") for skill in project_skills_data if skill.get("name")]
-                project_skills = list(set([skill.strip() for skill in project_skills if skill and skill.strip()]))
+                project_skill_ids = [skill.get("id") for skill in project_skills_data if skill.get("id")]
+                project_skill_names = [skill.get("name") for skill in project_skills_data if skill.get("name")]
+                project_skill_names = list(set([skill.strip() for skill in project_skill_names if skill and skill.strip()]))
                 
-                if not project_skills:
+                if not project_skill_ids and not project_skill_names:
                     logger.info(f"⚠️  No skills extracted from project - allowing (may be general project)")
-                elif not user_selected_skills:
+                elif not user_selected_skills and not user_selected_skill_ids:
                     logger.info(f"✅ No skill filter configured - allowing project")
                 else:
-                    # Perform enhanced skill matching
+                    # PRIORITY 1: Try ID-based matching first (most accurate)
                     matching_skills = []
-                    user_skills_lower = [skill.lower().strip() for skill in user_selected_skills]
-                    project_skills_lower = [skill.lower().strip() for skill in project_skills]
+                    if user_selected_skill_ids and project_skill_ids:
+                        matching_skill_ids = set(user_selected_skill_ids) & set(project_skill_ids)
+                        if matching_skill_ids:
+                            matching_skills = [f"ID:{sid}" for sid in matching_skill_ids]
+                            logger.info(f"🎯 ID MATCH: Found {len(matching_skills)} matching skill IDs: {list(matching_skill_ids)[:3]}...")
                     
-                    # Exact match first
-                    for user_skill in user_selected_skills:
-                        if user_skill in project_skills:
-                            matching_skills.append(user_skill)
-                    
-                    # Case-insensitive match
-                    if not matching_skills:
-                        for i, user_skill_lower in enumerate(user_skills_lower):
-                            for j, project_skill_lower in enumerate(project_skills_lower):
-                                if user_skill_lower == project_skill_lower:
-                                    matching_skills.append(user_selected_skills[i])
-                                    break
-                    
-                    # Partial/substring matching as fallback
-                    if not matching_skills:
+                    # PRIORITY 2: If no ID matches, try name-based matching
+                    if not matching_skills and user_selected_skills and project_skill_names:
+                        user_skills_lower = [skill.lower().strip() for skill in user_selected_skills]
+                        project_skills_lower = [skill.lower().strip() for skill in project_skill_names]
+                        
+                        # Exact match first
                         for user_skill in user_selected_skills:
-                            user_skill_lower = user_skill.lower().strip()
-                            for project_skill in project_skills:
-                                project_skill_lower = project_skill.lower().strip()
-                                if (user_skill_lower in project_skill_lower or 
-                                    project_skill_lower in user_skill_lower):
-                                    matching_skills.append(user_skill)
-                                    break
+                            if user_skill in project_skill_names:
+                                matching_skills.append(user_skill)
+                        
+                        # Case-insensitive match
+                        if not matching_skills:
+                            for i, user_skill_lower in enumerate(user_skills_lower):
+                                for j, project_skill_lower in enumerate(project_skills_lower):
+                                    if user_skill_lower == project_skill_lower:
+                                        matching_skills.append(user_selected_skills[i])
+                                        break
+                        
+                        # Partial/substring matching as fallback
+                        if not matching_skills:
+                            for user_skill in user_selected_skills:
+                                user_skill_lower = user_skill.lower().strip()
+                                for project_skill in project_skill_names:
+                                    project_skill_lower = project_skill.lower().strip()
+                                    if (user_skill_lower in project_skill_lower or 
+                                        project_skill_lower in user_skill_lower):
+                                        matching_skills.append(user_skill)
+                                        break
+                        
+                        if matching_skills:
+                            logger.info(f"🎯 NAME MATCH: Found {len(matching_skills)} matching skill names: {matching_skills[:3]}...")
                     
                     skill_match_count = len(set(matching_skills))  # Remove duplicates
                     
@@ -1301,8 +1399,14 @@ class AutoBidder:
                             logger.info(f"🔄 FALLBACK: Need {min_skill_match} skills, found {skill_match_count} ({skill_match_percentage:.0f}% ≥ 50%) - ALLOWING")
                         else:
                             logger.info(f"❌ SKILL MISMATCH: Need {min_skill_match}, found {skill_match_count} ({skill_match_percentage:.0f}% < 50%)")
-                            logger.info(f"   User skills: {user_selected_skills[:3]}...")
-                            logger.info(f"   Project skills: {project_skills[:3]}...")
+                            if user_selected_skills:
+                                logger.info(f"   User skills: {user_selected_skills[:3]}...")
+                            if user_selected_skill_ids:
+                                logger.info(f"   User skill IDs: {user_selected_skill_ids[:3]}...")
+                            if project_skill_names:
+                                logger.info(f"   Project skills: {project_skill_names[:3]}...")
+                            if project_skill_ids:
+                                logger.info(f"   Project skill IDs: {project_skill_ids[:3]}...")
                             filter_stats["skill_rejected"] += 1
                             continue
                     else:
@@ -1492,7 +1596,7 @@ class AutoBidder:
         return f"{int(days)} days ago"
 
     async def _save_bid_history(self, bid_data: Dict):
-        """Save bid attempt to database"""
+        """PERFORMANCE: Save bid attempt to database and invalidate cache"""
         try:
             from database import SessionLocal
             from models import BidHistory
@@ -1513,6 +1617,11 @@ class AutoBidder:
                 db.add(history)
                 db.commit()
                 logger.info("✅ Saved to bid history database")
+                
+                # PERFORMANCE: Invalidate cache after saving
+                user_id = bid_data.get("user_id", 1)
+                self._invalidate_bid_history_cache(user_id)
+                
             finally:
                 db.close()
                 

@@ -8,21 +8,20 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Optimized for Supabase Direct Connection (IPv4)
-# Direct connection requires more generous timeouts and connection management
+# Optimized for Supabase - Performance Tuned
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,  # Enable for direct connection to check connection health
-    pool_recycle=3600,  # Longer recycle time for direct connection (1 hour)
-    pool_size=5,  # Moderate pool size
-    max_overflow=10,  # Allow overflow connections
-    pool_timeout=30,  # Longer timeout for direct connection
+    pool_pre_ping=True,  # Check connection health before using
+    pool_recycle=1800,  # Recycle connections every 30 minutes
+    pool_size=10,  # Increased pool size for better concurrency
+    max_overflow=20,  # Allow more overflow connections
+    pool_timeout=10,  # Reduced timeout for faster failures
     echo=False,  # Disable SQL logging for performance
     future=True,  # Use SQLAlchemy 2.0 style
     connect_args={
-        "connect_timeout": 10,  # Longer connection timeout for direct connection
+        "connect_timeout": 5,  # Faster connection timeout
         "application_name": "akbpo_backend",
-        "options": "-c statement_timeout=30s"
+        "options": "-c statement_timeout=10s"  # Reduced from 30s to 10s
     }
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
