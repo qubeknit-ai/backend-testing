@@ -223,6 +223,40 @@ class AutoBidSettings(Base):
     # Relationship
     user = relationship("User")
 
+class UpworkCredentials(Base):
+    __tablename__ = "upwork_credentials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    access_token = Column(Text, nullable=True)
+    oauth_token = Column(Text, nullable=True)
+    upwork_user_id = Column(String, nullable=True)
+    is_validated = Column(Boolean, default=False)
+    validated_username = Column(String, nullable=True)
+    validated_email = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_validated = Column(DateTime, nullable=True)
+    user = relationship("User")
+
+
+class GuruCredentials(Base):
+    __tablename__ = "guru_credentials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    access_token = Column(Text, nullable=True)
+    csrf_token = Column(String, nullable=True)
+    guru_user_id = Column(String, nullable=True)
+    is_validated = Column(Boolean, default=False)
+    validated_username = Column(String, nullable=True)
+    validated_email = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_validated = Column(DateTime, nullable=True)
+    user = relationship("User")
+
+
 class ClosedDeal(Base):
     __tablename__ = "closed_deals"
 

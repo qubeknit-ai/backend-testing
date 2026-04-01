@@ -46,6 +46,10 @@ from routers.debug import router as debug_router
 app.include_router(debug_router)
 from routers.health import router as health_router
 app.include_router(health_router)
+from routers.upwork import router as upwork_router
+app.include_router(upwork_router)
+from routers.guru import router as guru_router
+app.include_router(guru_router)
 
 
 
