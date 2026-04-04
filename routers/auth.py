@@ -238,7 +238,8 @@ async def check_token_scopes(request: ProjectsRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/user/info")
+# Removed duplicate route
+
 async def get_user_info_with_cookies(
     request_data: dict
 ):

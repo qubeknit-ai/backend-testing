@@ -27,6 +27,10 @@ load_dotenv()
 
 app = FastAPI()
 
+@app.get("/api/test-server")
+async def test_server():
+    return {"status": "ok", "message": "Backend is running and accessible"}
+
 # Move CORS to the top to ensure it wraps all routes and handlers
 # When allow_credentials=True, allow_origins cannot be ["*"]
 origins = [
