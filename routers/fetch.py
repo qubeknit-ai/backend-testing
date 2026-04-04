@@ -15,7 +15,7 @@ from models import *
 from schemas import *
 from core.dependencies import get_db, get_user_by_email, get_system_settings, check_and_reset_daily_limit, verify_admin, prepare_freelancer_request
 from core.utils import extract_category_from_text, start_cache_cleanup, extract_category_from_url, init_db, trigger_webhook_async, _check_db_status
-from auth import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
+from .auth import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
 
 router = APIRouter()
 
