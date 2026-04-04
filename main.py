@@ -16,7 +16,7 @@ import threading
 import time
 from schemas import UserSignup, UserLogin, Token, UserResponse, SettingsUpdate, SettingsResponse, UserProfileUpdate, TalentCreate, TalentUpdate, TalentResponse, FreelancerCredentialsCreate, FreelancerCredentialsResponse, FreelancerCredentialsUpdate, AutoBidSettings, ClosedDealCreate, ClosedDealUpdate, ClosedDealResponse
 from autobid_service import bidder as autobidder
-from auth import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
+from auth_utils import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
 import json
 from urllib.parse import unquote
 import re

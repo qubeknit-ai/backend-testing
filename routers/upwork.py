@@ -8,7 +8,7 @@ import os
 from database import SessionLocal
 from models import User, Lead, BidHistory, UpworkCredentials
 from core.dependencies import get_db, get_user_by_email
-from auth import verify_token
+from auth_utils import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
 
 router = APIRouter()
 

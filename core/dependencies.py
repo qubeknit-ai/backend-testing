@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import func
 import json
 from models import *
-from auth import verify_token
+from auth_utils import verify_token
 from database import SessionLocal
 
 def get_db():

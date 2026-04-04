@@ -8,7 +8,7 @@ import os
 from database import SessionLocal
 from models import User, Lead, BidHistory, GuruCredentials
 from core.dependencies import get_db, get_user_by_email
-from auth import verify_token
+from auth_utils import verify_token
 
 router = APIRouter()
 
