@@ -44,11 +44,14 @@ origins = [
     "http://localhost:5173",
     "http://localhost:3000",
     "http://localhost:8000",
+    "chrome-extension://mejgjedpahjpkiangphnccdapnimhgne",
+    "chrome-extension://bkjdkeipolippbigickoolgceahhgkke"
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"chrome-extension://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
