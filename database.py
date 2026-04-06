@@ -20,8 +20,8 @@ engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,     # Drop stale connections before use
     pool_recycle=300,       # 5 min — short recycle suits serverless lifetimes
-    pool_size=2,            # 2 per instance; Vercel spins many instances
-    max_overflow=5,         # Max 7 total per instance
+    pool_size=15,           # 15 per instance; GitHub Action runs all users in one instance
+    max_overflow=10,        # Max 25 total per instance
     pool_timeout=30,        # Wait up to 30s to acquire a connection
     echo=False,
     future=True,
