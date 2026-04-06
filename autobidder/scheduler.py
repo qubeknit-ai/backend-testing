@@ -330,7 +330,7 @@ class AutoBidderSchedulerMixin:
                         logger.warning(f"⚠️  User {user_id}: No skills found on Freelancer.com profile. This user cannot bid on any projects.")
                 else:
                     logger.error(f"❌ User {user_id}: No credentials found in database")
-                    return False
+                    return "CREDENTIALS_MISSING"
             except Exception as e:
                 logger.error(f"❌ Error getting selected skills for User {user_id}: {e}")
             finally:
@@ -403,10 +403,10 @@ class AutoBidderSchedulerMixin:
                         return True
                     elif bid_result == "BID_LIMIT_REACHED":
                         logger.error(f"🚫 User {user_id}: Bid limit reached - stopping bid cycle for this user")
-                        return False  # Stop the entire cycle for this user
+                        return "BID_LIMIT_REACHED"
                     elif bid_result == "CREDENTIALS_EXPIRED":
                         logger.error(f"🔐 User {user_id}: Credentials expired - stopping bid cycle for this user")
-                        return False  # Stop the entire cycle for this user
+                        return "CREDENTIALS_EXPIRED"
                     else:
                         logger.info(f"❌ User {user_id}: Bid failed on fresh project, trying next...")
                         continue
@@ -437,7 +437,7 @@ class AutoBidderSchedulerMixin:
 
         except Exception as e:
             logger.error(f"Error in bid cycle for User {user_id}: {e}")
-            return False
+            return "ERROR"
 
     def _format_time_ago(self, timestamp):
         """Format timestamp to 'X hours/days ago' like manual flow"""
