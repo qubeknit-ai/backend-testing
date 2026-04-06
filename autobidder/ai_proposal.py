@@ -53,7 +53,7 @@ class AutoBidderAIBidMixin:
             if api_key:
                 headers["X-API-Key"] = api_key
             
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(webhook_url, json=payload, headers=headers)
                 
                 if response.status_code == 200:
