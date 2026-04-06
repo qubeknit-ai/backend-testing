@@ -124,6 +124,9 @@ class AutoBidderSchedulerMixin:
                 logger.info(f"🔄 Adding User {user_id} to parallel processing queue")
                 results_summary["active_users"].append(user_id)
                 
+                # Stagger the start to avoid slamming the API at the same millisecond
+                await asyncio.sleep(random.uniform(0.5, 2.5))
+                
                 # Create task for parallel execution
                 task = asyncio.create_task(self._run_bid_cycle(user_id, settings))
                 tasks.append((user_id, task))
