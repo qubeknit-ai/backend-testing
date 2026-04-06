@@ -304,6 +304,10 @@ class AutoBidderSchedulerMixin:
                 db = SessionLocal()
                 # Always fetch actual skill IDs from the user's Freelancer.com profile
                 # This ensures we don't bid on projects that the user doesn't have skills for
+                credentials = db.query(FreelancerCredentials).filter(
+                    FreelancerCredentials.user_id == user_id
+                ).first()
+                
                 if credentials:
                     user_selected_skills = credentials.selected_skills if credentials.selected_skills else []
                     logger.info(f"🎯 User {user_id}: Using {len(user_selected_skills)} selected skills from DB: {user_selected_skills}")
