@@ -25,10 +25,10 @@ class AutoBidderAPIMixin:
         
         # PERFORMANCE: Try fastest/most reliable strategies first
         strategies = [
-            ("recent_all", "All recent projects", 15),      # Fastest, no filtering - 15s timeout
-            ("skill_based", "Projects matching user skills", 20),  # More specific - 20s timeout
-            ("recommended", "Recommended projects", 15),    # Medium speed - 15s timeout
-            ("popular", "Popular projects", 15)             # Fallback - 15s timeout
+            ("recent_all", "All recent projects", 3),      # Fastest, no filtering - 3s timeout
+            ("skill_based", "Projects matching user skills", 4),  # More specific - 4s timeout
+            ("recommended", "Recommended projects", 3),    # Medium speed - 3s timeout
+            ("popular", "Popular projects", 3)             # Fallback - 3s timeout
         ]
         
         for strategy, description, timeout in strategies:
