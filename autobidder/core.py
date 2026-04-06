@@ -244,6 +244,11 @@ class AutoBidderCoreMixin:
                 await self._disable_user_autobidding(user_id)
                 return "BID_LIMIT_REACHED"
             
+            if "restricted from bidding" in error_message.lower() or "is restricted" in error_message.lower():
+                logger.error(f"⛔ User {user_id}: Account is RESTRICTED from bidding by Freelancer.com! Disabling auto-bidding...")
+                await self._disable_user_autobidding(user_id)
+                return "ACCOUNT_RESTRICTED"
+            
             # Save ALL other errors to history to prevent retry (but NOT already_bid errors)
             await self._save_bid_history({
                 "user_id": user_id,
