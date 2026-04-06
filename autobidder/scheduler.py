@@ -154,17 +154,20 @@ class AutoBidderSchedulerMixin:
                         results_summary["successful_bids"] += 1
                         logger.info(f"✅ User {user_id}: Successful bid placed in parallel processing")
                     elif result == "BID_LIMIT_REACHED":
-                        logger.error(f"🚫 User {user_id}: Bid limit reached during parallel processing")
-                        self._handle_user_failure(user_id)
+                        logger.error(f"🚫 User {user_id}: Bid limit reached")
                         results_summary["failed_users"] += 1
                     elif result == "CREDENTIALS_EXPIRED":
-                        logger.error(f"🔐 User {user_id}: Credentials expired during parallel processing")
-                        self._handle_user_failure(user_id)
+                        logger.error(f"🔐 User {user_id}: Credentials expired")
                         results_summary["failed_users"] += 1
+                    elif result == "ACCOUNT_RESTRICTED":
+                        logger.error(f"⛔ User {user_id}: Account restricted by Freelancer.com")
+                        results_summary["failed_users"] += 1
+                    elif result in ["NO_PROJECTS_FOUND", "NO_MATCHING_PROJECTS", "NO_BIDS_PLACED"]:
+                        logger.info(f"⏸️  User {user_id}: {result.replace('_', ' ').capitalize()}")
+                        results_summary["skipped_users"] += 1
                     else:
-                        logger.info(f"ℹ️  User {user_id}: No bid placed during parallel processing")
-                        self._handle_user_failure(user_id)
-                        results_summary["failed_users"] += 1
+                        logger.info(f"ℹ️  User {user_id}: No bid placed this cycle")
+                        results_summary["skipped_users"] += 1
                 
                 logger.info(f"📊 Batch complete: {results_summary['successful_bids']}/{len(tasks)} users placed successful bids")
             else:
@@ -281,11 +284,12 @@ class AutoBidderSchedulerMixin:
 
     async def _run_bid_cycle(self, user_id: int, settings: Dict):
         """Execute one complete bidding cycle for a specific user"""
+        logger.info(f"\n🚀 --- Starting User {user_id} Cycle ---")
         try:
             # 0. Check daily bid limit first
             if not await self._check_daily_bid_limit(user_id, settings):
                 logger.error(f"🚫 User {user_id}: Daily bid limit reached - stopping bid cycle")
-                return False
+                return "BID_LIMIT_REACHED"
             
             # 0.1. Clean up old bid history (once per cycle)
             await self._cleanup_old_bid_history(user_id, days_to_keep=7)
@@ -335,8 +339,8 @@ class AutoBidderSchedulerMixin:
             # 1. Fetch projects using enhanced fallback strategy
             projects = await self._fetch_projects_with_fallbacks(user_id)
             if not projects:
-                logger.info(f"📭 User {user_id}: No projects found")
-                return False
+                logger.info(f"📭 User {user_id}: No projects found on Freelancer.com")
+                return "NO_PROJECTS_FOUND"
 
             logger.info(f"📥 User {user_id}: Found {len(projects)} total projects")
 
@@ -350,8 +354,8 @@ class AutoBidderSchedulerMixin:
             
             if not filtered_projects:
                 min_skill_match = settings.get("min_skill_match", 1)
-                logger.info(f"🔍 User {user_id}: No projects match criteria (currencies: {settings.get('currencies', ['USD'])}, max bids: {settings.get('max_project_bids', 50)}, min skills: {min_skill_match}, max age: 15 minutes)")
-                return False
+                logger.info(f"🔍 User {user_id}: No projects match criteria (Skill Match, Currency, or Age > 15min)")
+                return "NO_MATCHING_PROJECTS"
 
             min_skill_match = settings.get("min_skill_match", 1)
             logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, min skills: {min_skill_match}, posted within 15 minutes)")
@@ -428,9 +432,8 @@ class AutoBidderSchedulerMixin:
                 logger.info(f"   ⏭️  Already attempted: {skipped_count}")
                 logger.info(f"   🆕 New projects to try: {len(filtered_projects) - skipped_count}")
             
-            logger.info(f"   💡 Result: No successful bids this cycle")
-            
-            return False
+            logger.info(f"🏁 --- Finished User {user_id} Cycle (No bids were placed) ---")
+            return "NO_BIDS_PLACED"
 
         except Exception as e:
             logger.error(f"Error in bid cycle for User {user_id}: {e}")
