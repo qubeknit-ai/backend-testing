@@ -21,7 +21,7 @@
   "crons": [
     {
       "path": "/api/autobid/run-cycle",
-      "schedule": "0 0 * * *"
+      "schedule": "5 * * * *"
     }
   ]
 }
