@@ -302,29 +302,31 @@ class AutoBidderSchedulerMixin:
                 from models import FreelancerCredentials
                 
                 db = SessionLocal()
-                try:
-                    credentials = db.query(FreelancerCredentials).filter(
-                        FreelancerCredentials.user_id == user_id
-                    ).first()
+                # Always fetch actual skill IDs from the user's Freelancer.com profile
+                # This ensures we don't bid on projects that the user doesn't have skills for
+                if credentials:
+                    user_selected_skills = credentials.selected_skills if credentials.selected_skills else []
+                    logger.info(f"🎯 User {user_id}: Using {len(user_selected_skills)} selected skills from DB: {user_selected_skills}")
                     
-                    if credentials and credentials.selected_skills:
-                        user_selected_skills = credentials.selected_skills
-                        logger.info(f"🎯 User {user_id}: Found {len(user_selected_skills)} selected skills: {user_selected_skills}")
-                        
-                        # Also get the skill IDs from the user's profile for ID-based matching
-                        headers = {"Content-Type": "application/json"}
-                        cookies_dict = credentials.cookies if credentials.cookies else {}
-                        
-                        client = await self._get_http_client()
-                        user_skill_ids = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
-                        user_selected_skill_ids = user_skill_ids
-                        logger.info(f"🎯 User {user_id}: Found {len(user_selected_skill_ids)} skill IDs: {user_selected_skill_ids}")
+                    # Fetch ACTUAL skill IDs from Freelancer API for all users
+                    headers = {"Content-Type": "application/json"}
+                    cookies_dict = credentials.cookies if credentials.cookies else {}
+                    
+                    client = await self._get_http_client()
+                    user_skill_ids = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
+                    user_selected_skill_ids = user_skill_ids
+                    
+                    if user_selected_skill_ids:
+                        logger.info(f"🎯 User {user_id}: Verified {len(user_selected_skill_ids)} profile skills on Freelancer.com")
                     else:
-                        logger.info(f"ℹ️  User {user_id}: No selected skills found, will use all profile skills")
-                finally:
-                    db.close()
+                        logger.warning(f"⚠️  User {user_id}: No skills found on Freelancer.com profile. This user cannot bid on any projects.")
+                else:
+                    logger.error(f"❌ User {user_id}: No credentials found in database")
+                    return False
             except Exception as e:
                 logger.error(f"❌ Error getting selected skills for User {user_id}: {e}")
+            finally:
+                db.close()
             
             # 1. Fetch projects using enhanced fallback strategy
             projects = await self._fetch_projects_with_fallbacks(user_id)

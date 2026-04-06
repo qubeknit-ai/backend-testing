@@ -292,14 +292,24 @@ class AutoBidderFilterMixin:
                     filter_stats["commission_rejected"] += 1
                     continue
 
-            # 3. Check skill matching - ENHANCED VERSION with ID-based matching
+            # 3. Check skill matching - MANDATORY Check to avoid Freelancer.com errors
+            # Use enhanced skill extraction
+            project_skills_data = self._extract_project_skills(project)
+            project_skill_ids = [skill.get("id") for skill in project_skills_data if skill.get("id")]
+            project_skill_names = [skill.get("name") for skill in project_skills_data if skill.get("name")]
+            project_skill_names = list(set([skill.strip() for skill in project_skill_names if skill and skill.strip()]))
+            
+            # MANDATORY SAFETY CHECK: If the user has a profile and the project has skills, 
+            # we MUST have at least one match, otherwise Freelancer will reject the bid with a 400 error.
+            if user_selected_skill_ids and project_skill_ids:
+                matching_skill_ids = set(user_selected_skill_ids) & set(project_skill_ids)
+                if not matching_skill_ids:
+                    logger.info(f"❌ MANDATORY SKILL REJECTION: User has 0 matching skill IDs for this project. Skipping to avoid Freelancer 400 error.")
+                    filter_stats["skill_rejected"] += 1
+                    continue
+            
+            # Additional user-defined filter (min_skill_match)
             if min_skill_match > 0:
-                # Use enhanced skill extraction
-                project_skills_data = self._extract_project_skills(project)
-                project_skill_ids = [skill.get("id") for skill in project_skills_data if skill.get("id")]
-                project_skill_names = [skill.get("name") for skill in project_skills_data if skill.get("name")]
-                project_skill_names = list(set([skill.strip() for skill in project_skill_names if skill and skill.strip()]))
-                
                 if not project_skill_ids and not project_skill_names:
                     logger.info(f"⚠️  No skills extracted from project - allowing (may be general project)")
                 elif not user_selected_skills and not user_selected_skill_ids:
