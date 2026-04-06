@@ -86,14 +86,16 @@ class AutoBidderAPIMixin:
                     user_skills = await self._get_user_skill_ids(user_id, client, headers, cookies_dict)
                     if user_skills:
                         # Use user's actual skill IDs for API call
-                        skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills[:10]])  # Limit to top 10 skills
+                        # Limit to top 50 skills (Freelancer max) and ensure they are numbers
+                        skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills[:50]])
                         url = f"{base_url}?{params}&{skills_params}&languages[]=en"
-                        logger.info(f"🎯 User {user_id}: Fetching projects for skill IDs: {user_skills[:10]}")
+                        logger.info(f"🎯 User {user_id}: Searching LATEST projects for {len(user_skills[:50])} profile skills")
                     else:
                         logger.warning(f"⚠️  User {user_id}: No skills found, falling back to general search")
                         return []
                 elif strategy == "recommended":
-                    url = f"{base_url}?{params}&user_recommended=true"
+                    # For recommended, we still want LATEST posts but using the account's context
+                    url = f"{base_url}?{params}&user_recommended=false" # user_recommended=true shifts to relevance instead of time
                 elif strategy == "recent_all":
                     url = f"{base_url}?{params}"
                 elif strategy == "popular":
