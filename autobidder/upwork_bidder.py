@@ -193,44 +193,8 @@ class UpworkAutoBidder:
                     
         return new_jobs_count
 
-
-                        
-                    data = response.json()
-                    jobs = data.get("jobs", [])
-                    
-                    for job_data in jobs:
-                        job_url = job_data.get("url")
-                        if not job_url: continue
-                        
-                        # DOUBLE CHECK: Deduplication
-                        existing = db.query(Lead).filter(
-                            Lead.user_id == user.id,
-                            Lead.url == job_url
-                        ).first()
-                        
-                        if not existing:
-                            new_lead = Lead(
-                                user_id=user.id,
-                                platform="Upwork",
-                                title=job_data.get("title", "Untitled Job"),
-                                budget=str(job_data.get("amount", job_data.get("budget", "—"))),
-                                description=job_data.get("snippet", job_data.get("description", "")),
-                                url=job_url,
-                                status="Pending",
-                                visible=True,
-                                created_at=datetime.utcnow()
-                            )
-                            db.add(new_lead)
-                            new_jobs_count += 1
-                            
-                    db.commit()
-                except Exception as e:
-                    logger.error(f"Error fetching jobs for category {category}: {e}")
-                    db.rollback()
-                    
-        return new_jobs_count
-
     async def run_cycle_batch(self) -> Dict[str, Any]:
+
         """Execute one cycle of Upwork bidding for all active users"""
         logger.info("🚀 Starting Upwork AutoBidder Cycle...")
         db = SessionLocal()
