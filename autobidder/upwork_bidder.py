@@ -9,7 +9,12 @@ import httpx
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Lead, User, UpworkCredentials, BidHistory, UserSettings
-from core.utils import trigger_webhook_async
+try:
+    from core.utils import trigger_webhook_async
+except ImportError:
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from core.utils import trigger_webhook_async
 
 logger = logging.getLogger("UpworkBidder")
 logging.basicConfig(level=logging.INFO)
@@ -113,6 +118,65 @@ class UpworkAutoBidder:
                 logger.error(f"Upwork API Error: {e}")
                 return {"error": str(e)}
 
+    async def _fetch_upwork_jobs(self, db: Session, user: User, token: str, categories: List[str]) -> int:
+
+        """Fetch jobs directly from Upwork Search API using OAuth2 token"""
+        logger.info(f"🔍 User {user.id}: Fetching Upwork jobs directly for {categories}...")
+        
+        # Upwork Search API (standard endpoint for Bearer token)
+        url = "https://www.upwork.com/api/profiles/v2/search/jobs.json"
+        new_jobs_count = 0
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for category in categories:
+                try:
+                    params = {
+                        "q": category,
+                        "paging": "0;10",  # Get latest 10 jobs
+                        "sort": "create_time desc"
+                    }
+                    headers = {"Authorization": f"Bearer {token}"}
+                    
+                    response = await client.get(url, params=params, headers=headers)
+                    if response.status_code != 200:
+                        logger.error(f"Upwork Search Error ({response.status_code}): {response.text}")
+                        continue
+                        
+                    data = response.json()
+                    jobs = data.get("jobs", [])
+                    
+                    for job_data in jobs:
+                        job_url = job_data.get("url")
+                        if not job_url: continue
+                        
+                        # DOUBLE CHECK: Deduplication
+                        existing = db.query(Lead).filter(
+                            Lead.user_id == user.id,
+                            Lead.url == job_url
+                        ).first()
+                        
+                        if not existing:
+                            new_lead = Lead(
+                                user_id=user.id,
+                                platform="Upwork",
+                                title=job_data.get("title", "Untitled Job"),
+                                budget=str(job_data.get("amount", job_data.get("budget", "—"))),
+                                description=job_data.get("snippet", job_data.get("description", "")),
+                                url=job_url,
+                                status="Pending",
+                                visible=True,
+                                created_at=datetime.utcnow()
+                            )
+                            db.add(new_lead)
+                            new_jobs_count += 1
+                            
+                    db.commit()
+                except Exception as e:
+                    logger.error(f"Error fetching jobs for category {category}: {e}")
+                    db.rollback()
+                    
+        return new_jobs_count
+
     async def run_cycle_batch(self) -> Dict[str, Any]:
         """Execute one cycle of Upwork bidding for all active users"""
         logger.info("🚀 Starting Upwork AutoBidder Cycle...")
@@ -127,7 +191,6 @@ class UpworkAutoBidder:
             "details": {},
             "timestamp": datetime.now().isoformat()
         }
-
         
         try:
             # 1. Find users with Upwork credentials
@@ -142,32 +205,22 @@ class UpworkAutoBidder:
             for user in active_users:
                 results_summary["active_users"].append(user.id)
                 
-                # 1.5 Auto-Fetch Leads if enabled
+                # 1.5 Fetch Jobs Directly (No n8n)
+                creds = db.query(UpworkCredentials).filter(UpworkCredentials.user_id == user.id).first()
+                if not creds or not creds.access_token:
+                    logger.warning(f"🔐 User {user.id}: Missing access token. Skipping.")
+                    results_summary["failed_users"] += 1
+                    results_summary["details"][user.id] = "Missing Upwork access token"
+                    continue
+
                 settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
-                if settings:
-                    logger.info(f"🔍 User {user.id}: Triggering automatic Upwork lead fetch...")
-                    webhook_url = os.getenv("UPWORK_WEBHOOK_URL")
-                    if webhook_url:
-                        fetch_payload = {
-                            "user_id": user.id,
-                            "user_email": user.email,
-                            "settings": {
-                                "job_categories": settings.upwork_job_categories,
-                                "max_jobs": settings.upwork_max_jobs or 3,
-                                "payment_verified": settings.upwork_payment_verified or False
-                            }
-                        }
-                        headers = {"Content-Type": "application/json"}
-                        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
-                        if api_key: headers["X-API-Key"] = api_key
-                        
-                        # Trigger webhook - we don't wait for completion here to avoid blocking
-                        await trigger_webhook_async(webhook_url, fetch_payload, headers)
-                        # Optional: brief sleep to allow initial leads to arrive
-                        await asyncio.sleep(2) 
+                categories = settings.upwork_job_categories if settings else ["Web Development"]
+                
+                # Internal direct fetch
+                new_jobs = await self._fetch_upwork_jobs(db, user, creds.access_token, categories)
+                logger.info(f"✅ User {user.id}: Discovered {new_jobs} new jobs.")
 
                 # 2. Get pending Upwork leads for this user
-
                 leads = db.query(Lead).filter(
                     Lead.user_id == user.id,
                     Lead.platform.ilike("Upwork"),
@@ -176,22 +229,16 @@ class UpworkAutoBidder:
                 ).order_by(Lead.created_at.desc()).limit(5).all()
 
                 if not leads:
-                    logger.info(f"⏭️  User {user.id}: No pending Upwork leads found in database.")
+                    logger.info(f"⏭️  User {user.id}: No pending leads found even after fetch.")
                     results_summary["skipped_users"] += 1
-                    results_summary["details"][user.id] = "No pending Upwork leads found"
-                    continue
-
-                creds = db.query(UpworkCredentials).filter(UpworkCredentials.user_id == user.id).first()
-                if not creds or not creds.access_token:
-                    logger.warning(f"🔐 User {user.id}: Missing access token for Upwork bidding.")
-                    results_summary["failed_users"] += 1
-                    results_summary["details"][user.id] = "Missing Upwork access token"
+                    results_summary["details"][user.id] = f"Fetch complete; 0 new jobs found"
                     continue
 
                 user_success = False
                 processed_count = 0
 
                 for lead in leads:
+
                     job_key = self._extract_job_key(lead.url)
                     if not job_key:
                         logger.warning(f"Could not extract job key from {lead.url}")
