@@ -124,8 +124,10 @@ class UpworkAutoBidder:
             "successful_bids": 0,
             "failed_users": 0,
             "skipped_users": 0,
+            "details": {},
             "timestamp": datetime.now().isoformat()
         }
+
         
         try:
             # 1. Find users with Upwork credentials
@@ -140,7 +142,32 @@ class UpworkAutoBidder:
             for user in active_users:
                 results_summary["active_users"].append(user.id)
                 
+                # 1.5 Auto-Fetch Leads if enabled
+                settings = db.query(UserSettings).filter(UserSettings.user_id == user.id).first()
+                if settings:
+                    logger.info(f"🔍 User {user.id}: Triggering automatic Upwork lead fetch...")
+                    webhook_url = os.getenv("UPWORK_WEBHOOK_URL")
+                    if webhook_url:
+                        fetch_payload = {
+                            "user_id": user.id,
+                            "user_email": user.email,
+                            "settings": {
+                                "job_categories": settings.upwork_job_categories,
+                                "max_jobs": settings.upwork_max_jobs or 3,
+                                "payment_verified": settings.upwork_payment_verified or False
+                            }
+                        }
+                        headers = {"Content-Type": "application/json"}
+                        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+                        if api_key: headers["X-API-Key"] = api_key
+                        
+                        # Trigger webhook - we don't wait for completion here to avoid blocking
+                        await trigger_webhook_async(webhook_url, fetch_payload, headers)
+                        # Optional: brief sleep to allow initial leads to arrive
+                        await asyncio.sleep(2) 
+
                 # 2. Get pending Upwork leads for this user
+
                 leads = db.query(Lead).filter(
                     Lead.user_id == user.id,
                     Lead.platform.ilike("Upwork"),
@@ -149,16 +176,21 @@ class UpworkAutoBidder:
                 ).order_by(Lead.created_at.desc()).limit(5).all()
 
                 if not leads:
+                    logger.info(f"⏭️  User {user.id}: No pending Upwork leads found in database.")
                     results_summary["skipped_users"] += 1
+                    results_summary["details"][user.id] = "No pending Upwork leads found"
                     continue
 
                 creds = db.query(UpworkCredentials).filter(UpworkCredentials.user_id == user.id).first()
                 if not creds or not creds.access_token:
-                    logger.warning(f"User {user.id} has no Upwork access token. Skipping.")
+                    logger.warning(f"🔐 User {user.id}: Missing access token for Upwork bidding.")
                     results_summary["failed_users"] += 1
+                    results_summary["details"][user.id] = "Missing Upwork access token"
                     continue
 
                 user_success = False
+                processed_count = 0
+
                 for lead in leads:
                     job_key = self._extract_job_key(lead.url)
                     if not job_key:
@@ -166,7 +198,9 @@ class UpworkAutoBidder:
                         continue
 
                     # 3. Process the lead
+                    processed_count += 1
                     proposal = await self._generate_proposal(user.id, lead)
+
                     
                     # Estimate amount
                     amount = 50.0
@@ -210,10 +244,13 @@ class UpworkAutoBidder:
                 
                 if user_success:
                     results_summary["successful_bids"] += 1
-                else:
+                    results_summary["details"][user.id] = f"Successfully bid on {processed_count} projects"
+                elif user.id not in results_summary["details"]:
                     results_summary["failed_users"] += 1
+                    results_summary["details"][user.id] = "Failed to place any bids"
 
             return results_summary
+
 
 
         except Exception as e:
