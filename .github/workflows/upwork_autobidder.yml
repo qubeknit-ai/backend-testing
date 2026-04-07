@@ -1,0 +1,34 @@
+name: Upwork AutoBidder
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # Run every 10 minutes
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  autobid:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run Upwork AutoBidder Cycle
+      env:
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        N8N_WEBHOOK_API_KEY: ${{ secrets.N8N_WEBHOOK_API_KEY }}
+        PROPOSAL_GENERATOR_WEBHOOK_URL: ${{ secrets.PROPOSAL_GENERATOR_WEBHOOK_URL }}
+      run: |
+        cd backend
+        python cron_upwork_bidding.py

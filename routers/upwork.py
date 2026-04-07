@@ -9,6 +9,8 @@ from database import SessionLocal
 from models import User, Lead, BidHistory, UpworkCredentials
 from core.dependencies import get_db, get_user_by_email
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
+from autobidder.upwork_bidder import upwork_bidder
+
 
 router = APIRouter()
 
@@ -253,9 +255,10 @@ async def get_upwork_autobid_stats(
             "bids_today": bids_today,
             "bids_week": bids_week,
             "success_week": success_week,
-            "is_running": False,
+            "is_running": upwork_bidder._is_running,
             "connects_used": 0
         }
+
     except Exception as e:
         return {"bids_today": 0, "bids_week": 0, "success_week": 0, "is_running": False}
 
@@ -297,6 +300,7 @@ async def start_upwork_autobid(
     email: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
+    upwork_bidder.start()
     return {"success": True, "message": "Upwork auto-bid started"}
 
 
@@ -305,7 +309,24 @@ async def stop_upwork_autobid(
     email: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
+    upwork_bidder.stop()
     return {"success": True, "message": "Upwork auto-bid stopped"}
+
+
+@router.post("/api/upwork/autobid/run-cycle")
+async def run_upwork_autobid_cycle(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Trigger a one-time bidding cycle for the current user"""
+    try:
+        # For now, we run the batch cycle which handles all users, 
+        # but we could optimize to run only for the calling user.
+        await upwork_bidder.run_cycle_batch()
+        return {"success": True, "message": "Upwork auto-bid cycle completed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ── Settings ──────────────────────────────────────────────────

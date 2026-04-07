@@ -17,7 +17,9 @@ import threading
 import time
 from schemas import UserSignup, UserLogin, Token, UserResponse, SettingsUpdate, SettingsResponse, UserProfileUpdate, TalentCreate, TalentUpdate, TalentResponse, FreelancerCredentialsCreate, FreelancerCredentialsResponse, FreelancerCredentialsUpdate, AutoBidSettings, ClosedDealCreate, ClosedDealUpdate, ClosedDealResponse
 from autobid_service import bidder as autobidder
+from autobidder.upwork_bidder import upwork_bidder
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
+
 import json
 from urllib.parse import unquote
 import re
@@ -132,6 +134,8 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     autobidder.stop()
+    upwork_bidder.stop()
+
 
 
 
