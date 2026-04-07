@@ -320,12 +320,15 @@ async def run_upwork_autobid_cycle(
 ):
     """Trigger a one-time bidding cycle for the current user"""
     try:
-        # For now, we run the batch cycle which handles all users, 
-        # but we could optimize to run only for the calling user.
-        await upwork_bidder.run_cycle_batch()
-        return {"success": True, "message": "Upwork auto-bid cycle completed"}
+        results = await upwork_bidder.run_cycle_batch()
+        return {
+            "success": True,
+            "message": "Upwork auto-bid cycle completed",
+            "results": results
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 

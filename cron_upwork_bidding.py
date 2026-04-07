@@ -19,9 +19,11 @@ async def run_upwork_cron():
     bidder = UpworkAutoBidder()
     try:
         # Run one cycle
-        await bidder.run_cycle_batch()
+        results = await bidder.run_cycle_batch()
+        logger.info(f"📊 Upwork Cycle Results: {json.dumps(results, indent=2)}")
         logger.info("✅ Upwork Cron Cycle Complete")
     except Exception as e:
+
         logger.error(f"❌ Upwork Cron Cycle Failed: {e}")
         import traceback
         logger.error(traceback.format_exc())

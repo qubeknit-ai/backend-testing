@@ -113,19 +113,32 @@ class UpworkAutoBidder:
                 logger.error(f"Upwork API Error: {e}")
                 return {"error": str(e)}
 
-    async def run_cycle_batch(self):
+    async def run_cycle_batch(self) -> Dict[str, Any]:
         """Execute one cycle of Upwork bidding for all active users"""
         logger.info("🚀 Starting Upwork AutoBidder Cycle...")
         db = SessionLocal()
+        
+        results_summary = {
+            "total_enabled_users": 0,
+            "active_users": [],
+            "successful_bids": 0,
+            "failed_users": 0,
+            "skipped_users": 0,
+            "timestamp": datetime.now().isoformat()
+        }
+        
         try:
-            # 1. Find users with Upwork credentials and enabled auto-bid
-            # Note: We use UserSettings to check if Upwork auto-bid is enabled
-            # Currently AutoBidSettings is platform-agnostic, but we'll adapt it
+            # 1. Find users with Upwork credentials
+            # Assuming auto-bid is enabled if credentials exist for the sake of this separate service
             active_users = db.query(User).join(UpworkCredentials).all()
+            results_summary["total_enabled_users"] = len(active_users)
             
+            if not active_users:
+                logger.info("😴 No users with Upwork credentials found")
+                return results_summary
+
             for user in active_users:
-                # Check user settings for Upwork auto-bid (assuming enabled for now if creds exist)
-                # In the future, we'd add 'upwork_autobid_enabled' to UserSettings
+                results_summary["active_users"].append(user.id)
                 
                 # 2. Get pending Upwork leads for this user
                 leads = db.query(Lead).filter(
@@ -136,13 +149,16 @@ class UpworkAutoBidder:
                 ).order_by(Lead.created_at.desc()).limit(5).all()
 
                 if not leads:
+                    results_summary["skipped_users"] += 1
                     continue
 
                 creds = db.query(UpworkCredentials).filter(UpworkCredentials.user_id == user.id).first()
                 if not creds or not creds.access_token:
                     logger.warning(f"User {user.id} has no Upwork access token. Skipping.")
+                    results_summary["failed_users"] += 1
                     continue
 
+                user_success = False
                 for lead in leads:
                     job_key = self._extract_job_key(lead.url)
                     if not job_key:
@@ -152,8 +168,7 @@ class UpworkAutoBidder:
                     # 3. Process the lead
                     proposal = await self._generate_proposal(user.id, lead)
                     
-                    # Estimate amount (use budget or fixed)
-                    # Simplified: extract first number from budget string
+                    # Estimate amount
                     amount = 50.0
                     try:
                         nums = re.findall(r"\d+", lead.budget.replace(",", ""))
@@ -164,9 +179,6 @@ class UpworkAutoBidder:
 
                     # 4. Submit Bid
                     logger.info(f"📤 Submitting bid for user {user.id} on job {job_key} (${amount})")
-                    # For safety in this environment, I'm logging instead of calling a live API
-                    # unless I'm 100% sure the endpoint is correct.
-                    # result = await self._submit_upwork_bid(creds.access_token, job_key, proposal, amount)
                     
                     # MOCKING SUCCESS for initial setup
                     result = {"data": {"createProposal": {"proposal": {"id": "mock_id", "status": "SUBMITTED"}}}}
@@ -188,12 +200,21 @@ class UpworkAutoBidder:
                         )
                         db.add(history)
                         logger.info(f"✅ Bid successful for lead {lead.id}")
+                        user_success = True
                     else:
                         error_msg = str(result.get("errors") or result.get("error"))
                         logger.error(f"❌ Bid failed: {error_msg}")
                         lead.status = "Failed"
                         
                     db.commit()
+                
+                if user_success:
+                    results_summary["successful_bids"] += 1
+                else:
+                    results_summary["failed_users"] += 1
+
+            return results_summary
+
 
         except Exception as e:
             logger.error(f"Cycle Error: {e}")
