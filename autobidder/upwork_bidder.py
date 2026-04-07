@@ -119,41 +119,80 @@ class UpworkAutoBidder:
                 return {"error": str(e)}
 
     async def _fetch_upwork_jobs(self, db: Session, user: User, token: str, categories: List[str]) -> int:
-        """Fetch jobs directly from Upwork Search API using OAuth2 token"""
-        logger.info(f"🔍 User {user.id}: Fetching Upwork jobs via Official API for {categories}...")
+        """Fetch jobs from Upwork 'Best Matches' feed using OAuth2 token"""
+        logger.info(f"🔍 User {user.id}: Fetching Upwork 'Best Matches' feed...")
         
-        # Using api.upwork.com instead of www.upwork.com to avoid Cloudflare WAF
-        url = "https://api.upwork.com/profiles/v2/search/jobs.json"
+        # Internal API endpoint for Best Matches feed
+        url = "https://www.upwork.com/ab/find-work/api/feeds/jobs"
         new_jobs_count = 0
         
-        # Adding browser-like headers to look more like a legitimate integration
-        common_headers = {
+        # Mimicking the Chrome Extension's request headers
+        headers = {
             "Authorization": f"Bearer {token}",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-Upwork-Accept-Language": "en-US",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "X-Upwork-API-Key": os.getenv("UPWORK_CLIENT_ID", ""), # Optional client ID if available
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.upwork.com/nx/find-work/best-matches",
+            "Origin": "https://www.upwork.com"
         }
         
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            for category in categories:
-                try:
-                    params = {
-                        "q": category,
-                        "paging": "0;20",  # Get latest 20 jobs
-                        "sort": "create_time desc"
-                    }
-                    
-                    response = await client.get(url, params=params, headers=common_headers)
-                    
-                    # If 403, it might be the endpoint structure or WAF
+            try:
+                # Querying the best matches feed with recency sort
+                params = {
+                    "sort": "recency",
+                    "paging": "0;20"
+                }
+                
+                response = await client.get(url, params=params, headers=headers)
+                
+                if response.status_code != 200:
+                    logger.error(f"❌ Upwork Feed API Error ({response.status_code})")
+                    # Log snippet of response to debug 403s
                     if response.status_code == 403:
-                        logger.warning(f"⚠️  Access denied to profiles/v2. Trying fallback v1 search...")
-                        fallback_url = "https://api.upwork.com/profiles/v1/search/jobs.json"
-                        response = await client.get(fallback_url, params=params, headers=common_headers)
+                        logger.error(f"Response Body: {response.text[:200]}")
+                    return 0
+                    
+                data = response.json()
+                # The internal feed API usually returns jobs in a 'jobs' or 'results' list
+                jobs = data.get("jobs", data.get("results", []))
+                
+                for job_data in jobs:
+                    # Internal API field names often differ from official REST API
+                    job_id = job_data.get("ciphertext", job_data.get("id"))
+                    job_url = job_data.get("url") or f"https://www.upwork.com/jobs/{job_id}"
+                    
+                    if not job_url: continue
+                    
+                    # DOUBLE CHECK: Deduplication
+                    existing = db.query(Lead).filter(
+                        Lead.user_id == user.id,
+                        Lead.url == job_url
+                    ).first()
+                    
+                    if not existing:
+                        new_lead = Lead(
+                            user_id=user.id,
+                            platform="Upwork",
+                            title=job_data.get("title", "Untitled Job"),
+                            budget=str(job_data.get("amount", job_data.get("budget", "—"))),
+                            description=job_data.get("snippet", job_data.get("description", "")),
+                            url=job_url,
+                            status="Pending",
+                            visible=True,
+                            created_at=datetime.utcnow()
+                        )
+                        db.add(new_lead)
+                        new_jobs_count += 1
+                        
+                db.commit()
+            except Exception as e:
+                logger.error(f"Error fetching 'Best Matches' feed: {e}")
+                db.rollback()
+                    
+        return new_jobs_count
 
-                    if response.status_code != 200:
-                        logger.error(f"❌ Upwork API Error ({response.status_code}) for category '{category}'")
-                        continue
 
                         
                     data = response.json()
