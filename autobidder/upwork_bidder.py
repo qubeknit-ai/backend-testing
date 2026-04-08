@@ -119,50 +119,65 @@ class UpworkAutoBidder:
                 return {"error": str(e)}
 
     async def _fetch_upwork_jobs(self, db: Session, user: User, token: str, categories: List[str]) -> int:
-        """Fetch jobs from Upwork 'Best Matches' feed using OAuth2 token"""
-        logger.info(f"🔍 User {user.id}: Fetching Upwork 'Best Matches' feed...")
+        """Fetch jobs from Upwork 'Best Matches' feed using GraphQL API"""
+        logger.info(f"🔍 User {user.id}: Fetching Upwork 'Best Matches' via GraphQL...")
         
-        # Internal API endpoint for Best Matches feed
-        url = "https://www.upwork.com/ab/find-work/api/feeds/jobs"
-        new_jobs_count = 0
+        url = "https://api.upwork.com/graphql"
+        query = """
+        query GetBestMatches($paging: PagingInput) {
+          marketplaceJobPostings(searchType: BEST_MATCHES, paging: $paging) {
+            edges {
+              node {
+                id
+                title
+                description
+                url
+                amount {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+          }
+        }
+        """
         
-        # Mimicking the Chrome Extension's request headers
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Requested-With": "XMLHttpRequest",
-            "X-Upwork-Accept-Language": "en-US",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://www.upwork.com/nx/find-work/best-matches",
-            "Origin": "https://www.upwork.com"
+        variables = {
+            "paging": {"count": 20}
         }
         
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        new_jobs_count = 0
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
             try:
-                # Querying the best matches feed with recency sort
-                params = {
-                    "sort": "recency",
-                    "paging": "0;20"
-                }
-                
-                response = await client.get(url, params=params, headers=headers)
+                response = await client.post(url, json={"query": query, "variables": variables}, headers=headers)
                 
                 if response.status_code != 200:
-                    logger.error(f"❌ Upwork Feed API Error ({response.status_code})")
-                    # Log snippet of response to debug 403s
-                    if response.status_code == 403:
-                        logger.error(f"Response Body: {response.text[:200]}")
-                    return 0
+                    logger.error(f"❌ Upwork GraphQL API Error ({response.status_code})")
+                    if response.status_code == 410 or response.status_code == 404:
+                         # Try fallback to internal GraphQL if official fails
+                         url = "https://www.upwork.com/api/v3/graphql"
+                         response = await client.post(url, json={"query": query, "variables": variables}, headers=headers)
+                    
+                    if response.status_code != 200:
+                        logger.error(f"Fallback also failed: {response.text[:200]}")
+                        return 0
                     
                 data = response.json()
-                # The internal feed API usually returns jobs in a 'jobs' or 'results' list
-                jobs = data.get("jobs", data.get("results", []))
-                
-                for job_data in jobs:
-                    # Internal API field names often differ from official REST API
-                    job_id = job_data.get("ciphertext", job_data.get("id"))
-                    job_url = job_data.get("url") or f"https://www.upwork.com/jobs/{job_id}"
+                if "errors" in data:
+                    logger.error(f"GraphQL Errors: {data['errors']}")
+                    return 0
                     
+                edges = data.get("data", {}).get("marketplaceJobPostings", {}).get("edges", [])
+                
+                for edge in edges:
+                    job_node = edge.get("node", {})
+                    job_url = job_node.get("url")
                     if not job_url: continue
                     
                     # DOUBLE CHECK: Deduplication
@@ -172,12 +187,15 @@ class UpworkAutoBidder:
                     ).first()
                     
                     if not existing:
+                        amt_data = job_node.get("amount", {})
+                        budget = str(amt_data.get("amount", "—"))
+                        
                         new_lead = Lead(
                             user_id=user.id,
                             platform="Upwork",
-                            title=job_data.get("title", "Untitled Job"),
-                            budget=str(job_data.get("amount", job_data.get("budget", "—"))),
-                            description=job_data.get("snippet", job_data.get("description", "")),
+                            title=job_node.get("title", "Untitled Job"),
+                            budget=budget,
+                            description=job_node.get("description", ""),
                             url=job_url,
                             status="Pending",
                             visible=True,
@@ -188,10 +206,11 @@ class UpworkAutoBidder:
                         
                 db.commit()
             except Exception as e:
-                logger.error(f"Error fetching 'Best Matches' feed: {e}")
+                logger.error(f"Error fetching Upwork Best Matches: {e}")
                 db.rollback()
                     
         return new_jobs_count
+
 
     async def run_cycle_batch(self) -> Dict[str, Any]:
 
