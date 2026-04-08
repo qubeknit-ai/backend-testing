@@ -147,13 +147,28 @@ class UpworkAutoBidder:
         }
         
         new_jobs_count = 0
+        # Advanced browser headers to bypass Cloudflare bot detection
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Origin": "https://www.upwork.com",
+            "Referer": "https://www.upwork.com/nx/find-work/best-matches",
+            "Sec-Ch-Ua": '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "X-Requested-With": "XMLHttpRequest"
         }
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Use HTTP/2 and a more realistic client configuration
+        async with httpx.AsyncClient(http2=True, timeout=30.0, follow_redirects=True) as client:
+
             try:
                 response = await client.post(url, json={"query": query, "variables": variables}, headers=headers)
                 
