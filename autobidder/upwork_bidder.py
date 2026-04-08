@@ -185,14 +185,16 @@ class UpworkAutoBidder:
                 response = await client.post(url, json={"query": query, "variables": variables})
                 
                 if response.status_code != 200:
-                    logger.error(f"❌ Upwork GraphQL API Error ({response.status_code})")
-                    if response.status_code == 410 or response.status_code == 404:
-                         # Try fallback to internal GraphQL if official fails
+                    logger.warning(f"⚠️ Upwork GraphQL API Status: {response.status_code}")
+                    
+                    if response.status_code in [401, 403, 410, 404]:
+                         # Try fallback to internal GraphQL if official fails or returns 401
+                         logger.info(f"🔄 Trying internal GraphQL fallback for user {user.id}...")
                          url = "https://www.upwork.com/api/v3/graphql"
-                         response = await client.post(url, json={"query": query, "variables": variables}, headers=headers)
+                         response = await client.post(url, json={"query": query, "variables": variables})
                     
                     if response.status_code != 200:
-                        logger.error(f"Fallback also failed: {response.text[:200]}")
+                        logger.error(f"❌ Fallback failed ({response.status_code}): {response.text[:200]}")
                         return 0
                     
                 data = response.json()
