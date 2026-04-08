@@ -167,10 +167,22 @@ class UpworkAutoBidder:
         }
         
         # Use HTTP/2 and a more realistic client configuration
-        async with httpx.AsyncClient(http2=True, timeout=30.0, follow_redirects=True) as client:
+        client_kwargs = {
+            "timeout": 30.0,
+            "follow_redirects": True,
+            "headers": headers
+        }
+        
+        try:
+            # Attempt to use HTTP/2 for better Cloudflare bypass
+            client = httpx.AsyncClient(http2=True, **client_kwargs)
+        except (ImportError, TypeError, Exception):
+            # Fallback to HTTP/1.1 if h2 is not installed
+            client = httpx.AsyncClient(http2=False, **client_kwargs)
 
+        async with client:
             try:
-                response = await client.post(url, json={"query": query, "variables": variables}, headers=headers)
+                response = await client.post(url, json={"query": query, "variables": variables})
                 
                 if response.status_code != 200:
                     logger.error(f"❌ Upwork GraphQL API Error ({response.status_code})")
