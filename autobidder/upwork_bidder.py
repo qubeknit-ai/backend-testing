@@ -119,12 +119,15 @@ class UpworkAutoBidder:
                 return {"error": str(e)}
 
     async def _fetch_upwork_jobs(self, db: Session, user: User, token: str, categories: List[str]) -> int:
-        """Fetch jobs from Upwork 'Best Matches' feed using GraphQL API"""
-        logger.info(f"🔍 User {user.id}: Fetching Upwork 'Best Matches' via GraphQL...")
+        """Fetch jobs from Upwork 'Best Matches' feed using Internal NX GraphQL API"""
+        logger.info(f"🔍 User {user.id}: Fetching Upwork 'Best Matches' via Internal NX API...")
         
-        url = "https://api.upwork.com/graphql"
+        # Internal NX GraphQL endpoint (used by the browser/extension)
+        url = "https://www.upwork.com/nx/graphql"
+        
+        # Internal GraphQL Query for Best Matches
         query = """
-        query GetBestMatches($paging: PagingInput) {
+        query FindWorkBestMatchesQuery($paging: PagingInput) {
           marketplaceJobPostings(searchType: BEST_MATCHES, paging: $paging) {
             edges {
               node {
@@ -147,26 +150,19 @@ class UpworkAutoBidder:
         }
         
         new_jobs_count = 0
-        # Advanced browser headers to bypass Cloudflare bot detection
+        
+        # Mimicking the exact headers used by the browser/extension for internal NX calls
         headers = {
             "Authorization": f"Bearer {token}",
+            "x-oauth-token": token,  # Internal tokens often use this custom header
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Origin": "https://www.upwork.com",
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://www.upwork.com/nx/find-work/best-matches",
-            "Sec-Ch-Ua": '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-            "X-Requested-With": "XMLHttpRequest"
+            "Origin": "https://www.upwork.com"
         }
         
-        # Use HTTP/2 and a more realistic client configuration
         client_kwargs = {
             "timeout": 30.0,
             "follow_redirects": True,
@@ -174,15 +170,30 @@ class UpworkAutoBidder:
         }
         
         try:
-            # Attempt to use HTTP/2 for better Cloudflare bypass
+            # Use HTTP/2 and standard client with fallback
             client = httpx.AsyncClient(http2=True, **client_kwargs)
-        except (ImportError, TypeError, Exception):
-            # Fallback to HTTP/1.1 if h2 is not installed
+        except:
             client = httpx.AsyncClient(http2=False, **client_kwargs)
 
         async with client:
             try:
                 response = await client.post(url, json={"query": query, "variables": variables})
+                
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ Upwork NX GraphQL Error ({response.status_code})")
+                    if response.status_code in [401, 403, 404]:
+                         # Try fallback to NX find-work specific endpoint
+                         url = "https://www.upwork.com/nx/find-work/api/graphql"
+                         response = await client.post(url, json={"query": query, "variables": variables})
+                    
+                    if response.status_code != 200:
+                        logger.error(f"❌ All internal GraphQL attempts failed ({response.status_code})")
+                        return 0
+                    
+                data = response.json()
+                if "errors" in data:
+                    logger.error(f"GraphQL Errors: {data['errors']}")
+                    return 0
                 
                 if response.status_code != 200:
                     logger.warning(f"⚠️ Upwork GraphQL API Status: {response.status_code}")
