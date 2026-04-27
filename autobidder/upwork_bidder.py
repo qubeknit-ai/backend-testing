@@ -35,7 +35,7 @@ class UpworkAutoBidder:
             return f"~{match.group(1)}"
         return None
 
-    async def _generate_proposal(self, user_id: int, lead: Lead) -> str:
+    async def _generate_proposal(self, user_id: int, lead: Lead, db: Session) -> str:
         """Generate AI proposal for an Upwork job"""
         logger.info(f"🤖 User {user_id}: Generating Upwork proposal for '{lead.title}'")
         
@@ -44,9 +44,13 @@ class UpworkAutoBidder:
             return f"I am interested in your project: {lead.title}. I have the skills required for this job."
 
         try:
+            settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
+            proposal_type = getattr(settings, "upwork_proposal_type", 1)
+
             payload = {
                 "user_id": user_id,
                 "platform": "Upwork",
+                "proposal_type": proposal_type,
                 "project": {
                     "title": lead.title,
                     "description": lead.description,
@@ -322,7 +326,7 @@ class UpworkAutoBidder:
 
                     # 3. Process the lead
                     processed_count += 1
-                    proposal = await self._generate_proposal(user.id, lead)
+                    proposal = await self._generate_proposal(user.id, lead, db)
 
                     
                     # Estimate amount

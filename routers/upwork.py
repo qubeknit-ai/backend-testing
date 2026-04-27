@@ -357,6 +357,7 @@ async def get_upwork_settings(
                 "min_skill_match": 1,
                 "smart_bidding": True,
                 "payment_verified_only": True,
+                "proposal_type": 1,
                 "job_categories": settings.upwork_job_categories if settings else ["Web Development"]
             }
 
@@ -368,6 +369,7 @@ async def get_upwork_settings(
             "min_skill_match": getattr(settings, "ai_agent_min_score", 1),
             "smart_bidding": True,
             "payment_verified_only": settings.upwork_payment_verified,
+            "proposal_type": getattr(settings, "upwork_proposal_type", 1),
             "job_categories": settings.upwork_job_categories or ["Web Development"]
         }
     except HTTPException:
@@ -401,6 +403,8 @@ async def save_upwork_settings(
             settings.ai_agent_max_connects_upwork = int(data["max_connects_per_day"])
         if data.get("payment_verified_only") is not None:
             settings.upwork_payment_verified = bool(data["payment_verified_only"])
+        if data.get("proposal_type") is not None:
+            settings.upwork_proposal_type = int(data["proposal_type"])
 
         settings.updated_at = datetime.utcnow()
         db.commit()

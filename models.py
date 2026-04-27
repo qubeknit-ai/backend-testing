@@ -73,6 +73,7 @@ class UserSettings(Base):
     upwork_job_categories = Column(JSON, default=lambda: ["Web Development"])
     upwork_max_jobs = Column(Integer, default=3)
     upwork_payment_verified = Column(Boolean, default=False)
+    upwork_proposal_type = Column(Integer, default=1)  # Proposal type: 1, 2, 3, or 4
     
     # Freelancer settings
     freelancer_job_category = Column(String, default="Web Development")
@@ -218,7 +219,7 @@ class AutoBidSettings(Base):
     max_project_bids = Column(Integer, default=50)  # Max existing bids on project
     smart_bidding = Column(Boolean, default=True)  # Use average of min/max
     min_skill_match = Column(Integer, default=1)  # Minimum number of skills that must match
-    proposal_type = Column(Integer, default=1)  # Proposal type: 1, 2, or 3
+    proposal_type = Column(Integer, default=1)  # Proposal type: 1, 2, 3, or 4
     commission_projects = Column(Boolean, default=True)  # Include commission-based projects
     
     created_at = Column(DateTime, default=datetime.utcnow)
