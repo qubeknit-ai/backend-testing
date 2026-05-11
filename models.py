@@ -262,6 +262,41 @@ class GuruCredentials(Base):
     user = relationship("User")
 
 
+class TruelancerCredentials(Base):
+    __tablename__ = "truelancer_credentials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+
+    # Truelancer auth token (JWT Bearer token from __NEXT_DATA__ or fetch intercept)
+    access_token = Column(Text, nullable=True)
+
+    # User identifiers
+    truelancer_user_id = Column(String, nullable=True)  # Truelancer user ID
+    truelancer_email = Column(String, nullable=True)    # Truelancer account email
+    truelancer_fname = Column(String, nullable=True)    # First name
+    truelancer_lname = Column(String, nullable=True)    # Last name
+    truelancer_picture_url = Column(Text, nullable=True)  # Profile picture URL
+    package_id = Column(Integer, nullable=True)         # Truelancer subscription package
+    currency = Column(String, nullable=True)            # Default currency (e.g. USD)
+
+    # Session cookies – stored as a JSON dict so the backend can proxy requests
+    cookies = Column(JSON, nullable=True)
+
+    # Validation state
+    is_validated = Column(Boolean, default=False)
+    validated_username = Column(String, nullable=True)  # Display name / username
+    validated_email = Column(String, nullable=True)     # Confirmed email
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_validated = Column(DateTime, nullable=True)
+
+    # Relationship
+    user = relationship("User")
+
+
 class ClosedDeal(Base):
     __tablename__ = "closed_deals"
 

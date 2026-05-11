@@ -116,6 +116,8 @@ from routers.upwork import router as upwork_router
 app.include_router(upwork_router)
 from routers.guru import router as guru_router
 app.include_router(guru_router)
+from routers.truelancer import router as truelancer_router
+app.include_router(truelancer_router)
 
 
 
