@@ -430,24 +430,166 @@ async def generate_truelancer_proposal(
 
 @router.get("/api/truelancer/bids")
 async def get_truelancer_bids(
-    filter: str = "all",
+    status: str = "all",
+    page: int = 1,
+    per_page: int = 20,
+    live: bool = False,
     email: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Return Truelancer bid history for the current user."""
+    """
+    Return Truelancer bid history.
+    If live=True, fetches directly from Truelancer API.
+    Otherwise, returns from local BidHistory table.
+    """
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
-    try:
-        user = db.query(User).filter(User.email == email).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+    
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
+    if live:
+        try:
+            creds = db.query(TruelancerCredentials).filter(TruelancerCredentials.user_id == user.id).first()
+            if not creds or not creds.access_token:
+                raise HTTPException(status_code=400, detail="Truelancer not connected")
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Use stored cookies for authentication
+                cookies = creds.cookies if isinstance(creds.cookies, dict) else {}
+                
+                # Try multiple candidate URLs
+                candidates = [
+                    {
+                        "url": "https://api.truelancer.com/api/v1/user/proposalsent",
+                        "method": "POST",
+                        "json": {"filter": "proposals", "page": page}
+                    },
+                    {
+                        "url": f"https://www.truelancer.com/api/v1/user/proposals-sent?filter=proposals&page={page}&per_page={per_page}",
+                        "method": "GET"
+                    },
+                    {
+                        "url": f"https://www.truelancer.com/api/v1/user/proposals-sent?page={page}&per_page={per_page}",
+                        "method": "GET"
+                    },
+                    {
+                        "url": f"https://api.truelancer.com/api/v1/proposals?page={page}&per_page={per_page}&status=sent",
+                        "method": "GET"
+                    }
+                ]
+                
+                response = None
+                last_error = None
+                used_url = None
+                
+                for cand in candidates:
+                    url = cand["url"]
+                    method = cand["method"]
+                    try:
+                        print(f"📡 [TRUELANCER] Trying bids endpoint ({method}): {url}")
+                        headers = {
+                            "Authorization": f"Bearer {creds.access_token}",
+                            "Accept": "application/json",
+                            "X-Requested-With": "XMLHttpRequest"
+                        }
+                        
+                        if method == "POST":
+                            resp = await client.post(
+                                url,
+                                headers=headers,
+                                json=cand.get("json"),
+                                cookies=cookies,
+                                timeout=10.0
+                            )
+                        else:
+                            resp = await client.get(
+                                url,
+                                headers=headers,
+                                cookies=cookies,
+                                timeout=10.0
+                            )
+
+                        if resp.status_code == 200:
+                            response = resp
+                            used_url = url
+                            break
+                        else:
+                            print(f"⚠️ [TRUELANCER] Endpoint {url} failed: {resp.status_code}")
+                            last_error = f"Status {resp.status_code}"
+                    except Exception as e:
+                        print(f"⚠️ [TRUELANCER] Error trying {url}: {e}")
+                        last_error = str(e)
+
+                if not response:
+                    print(f"❌ [TRUELANCER] All live bids endpoints failed. Last error: {last_error}")
+                    raise HTTPException(status_code=500, detail=f"Truelancer API Error: All endpoints failed ({last_error})")
+
+                print(f"✅ [TRUELANCER] Successfully fetched bids from: {used_url}")
+                data = response.json()
+                
+                proposals_wrapper = data.get("proposals", {})
+                if not proposals_wrapper and data.get("status") == 1:
+                    # In some responses, 'proposals' might be missing if no data
+                    proposals_wrapper = data
+                
+                live_bids = proposals_wrapper.get("data", data.get("data", []))
+                total = proposals_wrapper.get("total", data.get("total", len(live_bids)))
+                
+                return {
+                    "bids": [
+                        {
+                            "id": b.get("id"),
+                            "project_title": (
+                                b.get("job_title") or 
+                                b.get("title") or 
+                                b.get("job", {}).get("title") or 
+                                b.get("type", {}).get("title") or 
+                                "Untitled Project"
+                            ),
+                            "project_url": (
+                                b.get("project_url") or 
+                                (f"https://www.truelancer.com/freelance-project/{b.get('job_slug') or b.get('job', {}).get('slug') or b.get('type', {}).get('id')}")
+                            ),
+                            "bid_amount": b.get("total_amount") or b.get("amount") or b.get("price") or 0,
+                            "budget": b.get("job_budget") or b.get("job", {}).get("budget") or "N/A",
+                            "currency": b.get("job_currency") or b.get("currency") or "USD",
+                            "status": (
+                                b.get("status_text") or 
+                                b.get("status") or 
+                                b.get("proposalstatus", {}).get("displayvalue") or 
+                                "Submitted"
+                            ),
+                            "submitted_at": b.get("created_at") or b.get("sentdate"),
+                            "total_proposals": (
+                                b.get("job_total_proposals") or 
+                                b.get("job", {}).get("total_proposals") or 
+                                b.get("proposalRank") or 
+                                "N/A"
+                            )
+                        }
+                        for b in live_bids
+                    ],
+                    "total": total,
+                    "page": page,
+                    "per_page": per_page
+                }
+        except Exception as e:
+            print(f"❌ [TRUELANCER] Live bids fetch error: {e}")
+            # Fallback to local bids if live fails
+            pass
+
+    try:
         query = db.query(BidHistory).filter(BidHistory.user_id == user.id)
 
-        if filter != "all":
-            query = query.filter(func.lower(BidHistory.status) == filter.lower())
+        if status != "all":
+            query = query.filter(func.lower(BidHistory.status) == status.lower())
 
-        bids = query.order_by(BidHistory.created_at.desc()).limit(100).all()
+        total = query.count()
+        offset = (page - 1) * per_page
+        bids = query.order_by(BidHistory.created_at.desc()).offset(offset).limit(per_page).all()
+        
         return {
             "bids": [
                 {
@@ -460,12 +602,16 @@ async def get_truelancer_bids(
                     "submitted_at": b.created_at.isoformat() if b.created_at else None,
                 }
                 for b in bids
-            ]
+            ],
+            "total": total,
+            "page": page,
+            "per_page": per_page
         }
 
     except HTTPException:
         raise
     except Exception as e:
+        print(f"❌ [TRUELANCER] Error fetching bids: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch Truelancer bids")
 
 
@@ -522,7 +668,6 @@ async def place_truelancer_bid(
         # Submit to Truelancer
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Use 'files' parameter to force multipart/form-data which Truelancer requires
-            # Even if we don't have actual files, this is how httpx handles multipart
             files_payload = {k: (None, str(v)) for k, v in payload.items()}
             
             response = await client.post(
@@ -568,40 +713,45 @@ async def get_truelancer_autobid_stats(
     db: Session = Depends(get_db)
 ):
     if db is None:
-        return {"bids_today": 0, "bids_week": 0, "success_week": 0, "is_running": False}
+        return {"bids_today": 0, "bids_week": 0, "success_week": 0, "total_bids": 0, "success_rate": 0, "is_running": False}
     try:
         user = db.query(User).filter(User.email == email).first()
         if not user:
-            return {"bids_today": 0, "bids_week": 0, "success_week": 0, "is_running": False}
+            return {"bids_today": 0, "bids_week": 0, "success_week": 0, "total_bids": 0, "success_rate": 0, "is_running": False}
 
         now = datetime.utcnow()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=today_start.weekday())
+
+        total_bids = db.query(BidHistory).filter(BidHistory.user_id == user.id).count()
 
         bids_today = db.query(BidHistory).filter(
             BidHistory.user_id == user.id,
             BidHistory.created_at >= today_start
         ).count()
 
-        bids_week = db.query(BidHistory).filter(
+        bids_this_week = db.query(BidHistory).filter(
             BidHistory.user_id == user.id,
             BidHistory.created_at >= week_start
         ).count()
 
-        success_week = db.query(BidHistory).filter(
+        success_total = db.query(BidHistory).filter(
             BidHistory.user_id == user.id,
-            BidHistory.created_at >= week_start,
             func.lower(BidHistory.status).in_(["success", "accepted", "awarded"])
         ).count()
 
+        success_rate = round((success_total / total_bids * 100), 1) if total_bids > 0 else 0
+
         return {
+            "total_bids": total_bids,
             "bids_today": bids_today,
-            "bids_week": bids_week,
-            "success_week": success_week,
+            "bids_this_week": bids_this_week,
+            "success_rate": success_rate,
             "is_running": False,
         }
-    except Exception:
-        return {"bids_today": 0, "bids_week": 0, "success_week": 0, "is_running": False}
+    except Exception as e:
+        print(f"❌ [TRUELANCER] Error calculating stats: {e}")
+        return {"bids_today": 0, "bids_this_week": 0, "total_bids": 0, "success_rate": 0, "is_running": False}
 
 
 @router.post("/api/truelancer/autobid/start")
