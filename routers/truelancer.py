@@ -10,6 +10,8 @@ from sqlalchemy import func
 from typing import Optional
 from datetime import datetime, timedelta
 import os
+import httpx
+import json
 
 from database import SessionLocal
 from models import User, Lead, BidHistory, TruelancerCredentials
@@ -201,6 +203,7 @@ async def get_truelancer_status(
                 "email": creds.truelancer_email or creds.validated_email,
                 "user_id": creds.truelancer_user_id,
                 "picture_url": creds.truelancer_picture_url,
+                "truelancer_picture_url": creds.truelancer_picture_url,
                 "package_id": creds.package_id,
                 "currency": creds.currency,
             }
@@ -305,6 +308,124 @@ async def get_truelancer_projects(
         raise HTTPException(status_code=500, detail="Failed to fetch Truelancer projects")
 
 
+@router.get("/api/truelancer/recommended-jobs")
+async def get_truelancer_recommended_jobs(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Fetch recommended jobs directly from Truelancer API using stored credentials."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        creds = db.query(TruelancerCredentials).filter(
+            TruelancerCredentials.user_id == user.id
+        ).first()
+
+        if not creds or not creds.access_token:
+            raise HTTPException(status_code=400, detail="Truelancer not connected")
+
+        # Fetch projects from Truelancer API
+        # Extension uses POST https://api.truelancer.com/api/v1/projects with skill_matching: true
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.truelancer.com/api/v1/projects",
+                headers={
+                    "Authorization": f"Bearer {creds.access_token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                json={
+                    "page": 1,
+                    "per_page": 20,
+                    "sort": "newest",
+                    "skill_matching": True
+                }
+            )
+            
+            if response.status_code != 200:
+                print(f"❌ [TRUELANCER] API error: {response.status_code} {response.text}")
+                # If 401, maybe token expired
+                if response.status_code == 401:
+                    creds.is_validated = False
+                    db.commit()
+                    raise HTTPException(status_code=401, detail="Truelancer session expired. Please reconnect.")
+                raise HTTPException(status_code=500, detail="Failed to fetch jobs from Truelancer")
+
+            data = response.json()
+            projects = data.get("projects", {}).get("data", []) or data.get("data", [])
+            
+            return {"projects": projects, "total": len(projects)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [TRUELANCER] Error fetching recommended jobs: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/api/truelancer/generate-proposal")
+async def generate_truelancer_proposal(
+    project_data: dict,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Generate a proposal for a Truelancer project using n8n webhook (same format as Freelancer)."""
+    try:
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        webhook_url = os.getenv("FREELANCER_PROPOSAL_WEBHOOK_URL")
+        if not webhook_url:
+            raise HTTPException(status_code=500, detail="FREELANCER_PROPOSAL_WEBHOOK_URL not configured")
+        
+        # Prepare payload identical to Freelancer
+        payload = {
+            "user_id": user.id,
+            "user_email": user.email,
+            "project": {
+                "id": project_data.get("id"),
+                "title": project_data.get("title"),
+                "description": project_data.get("description"),
+                "preview_description": project_data.get("preview_description", ""),
+                "url": project_data.get("url"),
+                "budget": project_data.get("budget", {}),
+                "posted_time": project_data.get("posted_time"),
+                "bid_count": project_data.get("bid_count", 0),
+                "skills": project_data.get("skills", []),
+                "client": project_data.get("client"),
+                "delivery_time": project_data.get("delivery_time")
+            }
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+            
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(webhook_url, json=payload, headers=headers)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=500, detail="AI generation failed")
+            
+            return response.json()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [TRUELANCER] Proposal generation error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 # ── Bids ──────────────────────────────────────────────────────
 
 @router.get("/api/truelancer/bids")
@@ -346,6 +467,97 @@ async def get_truelancer_bids(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to fetch Truelancer bids")
+
+
+@router.post("/api/truelancer/bid")
+async def place_truelancer_bid(
+    bid_request: dict,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Place a bid on a Truelancer project."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        creds = db.query(TruelancerCredentials).filter(
+            TruelancerCredentials.user_id == user.id
+        ).first()
+
+        if not creds or not creds.access_token:
+            raise HTTPException(status_code=400, detail="Truelancer not connected")
+
+        project_id = bid_request.get("project_id")
+        amount = bid_request.get("amount")
+        description = bid_request.get("description")
+        currency = bid_request.get("currency", creds.currency or "USD")
+
+        if not project_id or not amount or not description:
+            raise HTTPException(status_code=400, detail="Missing required bid data")
+
+        # Prepare FormData payload for Truelancer
+        payload = {
+            'proposal[job_id]': str(project_id),
+            'proposal[job_currency]': currency,
+            'proposal[item]': '13',
+            'proposal[details]': description,
+            'proposal[total_amount]': str(amount),
+            'proposal[deposit_amount]': str(bid_request.get("deposit_amount", amount)),
+            'proposal[notify_freelancer]': '1'
+        }
+
+        # Build headers
+        headers = {
+            "Authorization": f"Bearer {creds.access_token}",
+            "Accept": "application/json"
+        }
+
+        # Build cookies if available
+        cookies = creds.cookies if isinstance(creds.cookies, dict) else {}
+
+        # Submit to Truelancer
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Use 'files' parameter to force multipart/form-data which Truelancer requires
+            # Even if we don't have actual files, this is how httpx handles multipart
+            files_payload = {k: (None, str(v)) for k, v in payload.items()}
+            
+            response = await client.post(
+                "https://api.truelancer.com/api/v1/proposal/save",
+                headers=headers,
+                cookies=cookies,
+                files=files_payload
+            )
+            
+            if response.status_code != 200:
+                print(f"❌ [TRUELANCER] Bid failed: {response.status_code} {response.text}")
+                return {"success": False, "error": response.text}
+
+            data = response.json()
+            if data.get("status") != 1:
+                return {"success": False, "error": data.get("message", "Truelancer error")}
+
+            # Save to bid history
+            history = BidHistory(
+                user_id=user.id,
+                project_id=str(project_id),
+                project_title=bid_request.get("project_title", "Truelancer Project"),
+                project_url=bid_request.get("project_url"),
+                bid_amount=float(amount),
+                proposal_text=description,
+                status="success"
+            )
+            db.add(history)
+            db.commit()
+
+            return {"success": True, "message": "Bid placed successfully"}
+
+    except Exception as e:
+        print(f"❌ [TRUELANCER] Bid placement error: {e}")
+        return {"success": False, "error": str(e)}
 
 
 # ── Auto-bid stats & history ──────────────────────────────────
