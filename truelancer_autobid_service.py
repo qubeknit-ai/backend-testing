@@ -183,12 +183,6 @@ class TruelancerAutoBidder:
                         logger.info(f"⏭️  User {user_id}: Skipping '{project.get('title')}' - Already in history")
                         continue
                     
-                    # Filter by competition
-                    bid_count = project.get("total_proposals", 0)
-                    if bid_count > setting.max_competition:
-                        logger.info(f"⏭️  User {user_id}: Skipping '{project.get('title')}' - Too much competition ({bid_count} proposals)")
-                        continue
-                    
                     user = db.query(User).filter(User.id == user_id).first()
                     logger.info(f"🧠 User {user_id}: Generating proposal for '{project.get('title')}'")
                     proposal_text = await self._generate_proposal(user, project)
@@ -217,7 +211,7 @@ class TruelancerAutoBidder:
                         db.commit()
                         return True
                     
-            return "No suitable new projects found (filtered by history or competition)"
+            return "No suitable new projects found (all already in history)"
         except Exception as e:
             logger.error(f"Error in User {user_id} cycle: {e}")
             return f"Error: {str(e)}"

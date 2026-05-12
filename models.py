@@ -354,7 +354,6 @@ class TruelancerAutoBidSettings(Base):
     enabled = Column(Boolean, default=False)
     daily_bids = Column(Integer, default=10)
     frequency_minutes = Column(Integer, default=15)
-    max_competition = Column(Integer, default=50)
     smart_bidding = Column(Boolean, default=True)
     proposal_type = Column(Integer, default=1)
 
