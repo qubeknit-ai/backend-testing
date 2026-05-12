@@ -20,7 +20,7 @@ from auth_utils import get_password_hash, verify_password, create_access_token, 
 router = APIRouter()
 
 @router.post("/api/leads/bulk")
-async def receive_leads_from_n8n(payload: dict, db: Session = Depends(get_db)):
+async def receive_leads_from_n8n(payload: dict, request: Request, db: Session = Depends(get_db)):
     """
     Endpoint for N8N to send scraped leads back to backend
     Expected payload: {
@@ -44,12 +44,23 @@ async def receive_leads_from_n8n(payload: dict, db: Session = Depends(get_db)):
         if db is None:
             raise HTTPException(status_code=500, detail="Database connection failed")
         
-        from models import Lead, Notification
+        from models import Lead, Notification, User
         from dateutil import parser
         
-        user_id = payload.get("user_id")
+        # Try to get user from token first (for frontend calls)
+        current_user = None
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            try:
+                token = auth_header.split(" ")[1]
+                email = verify_token(token)
+                current_user = get_user_by_email(email, db)
+            except:
+                pass
+
+        user_id = payload.get("user_id") or (current_user.id if current_user else None)
         if not user_id:
-            raise HTTPException(status_code=400, detail="user_id is required")
+            raise HTTPException(status_code=400, detail="user_id is required (provide in payload or via Auth token)")
         
         leads_data = payload.get("leads", [])
         if not leads_data:
@@ -127,7 +138,7 @@ async def receive_leads_from_n8n(payload: dict, db: Session = Depends(get_db)):
 @router.get("/api/leads")
 async def get_leads(
     page: int = Query(1, ge=1, description="Page number"),
-    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    limit: int = Query(50, ge=1, le=500, description="Items per page"),
     platform: Optional[str] = Query(None, description="Filter by platform"),
     status: Optional[str] = Query(None, description="Filter by status"),
     email: str = Depends(verify_token), 
@@ -146,21 +157,27 @@ async def get_leads(
             Lead.visible == True
         )
         
+        print(f"🔍 [BACKEND] Fetching leads for user_id={user.id}, platform={platform}")
+        
         if platform:
             query = query.filter(func.lower(Lead.platform) == platform.lower())
         if status:
             query = query.filter(Lead.status == status)
         
+        # Debug: Check total count before pagination
+        debug_count = query.count()
+        print(f"📊 [BACKEND] Found {debug_count} leads matching filters")
+        
         # OPTIMIZED: Get count and data in single query using window function
         # This is faster than separate count() query
-        from sqlalchemy import func, over
+        from sqlalchemy import over
         
         # Get total count efficiently
         total = query.count()
         
-        # Apply pagination and ordering - OPTIMIZED: Use indexed column
+        # Apply pagination and ordering - Order by ID desc for most recent first
         offset = (page - 1) * limit
-        leads = query.order_by(Lead.updated_at.desc()).offset(offset).limit(limit).all()
+        leads = query.order_by(Lead.id.desc()).offset(offset).limit(limit).all()
         
         # OPTIMIZED: Build response with minimal data processing
         return {
