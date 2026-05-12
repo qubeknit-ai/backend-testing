@@ -865,7 +865,7 @@ async def get_truelancer_autobid_history(
                 "bid_amount": h.bid_amount,
                 "bid_time": h.created_at.isoformat() if h.created_at else None,
                 "status": h.status,
-                "error": h.error,
+                "error": h.error_message,
                 "proposal_text": h.proposal_text
             }
             for h in history

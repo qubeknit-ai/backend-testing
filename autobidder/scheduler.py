@@ -10,7 +10,7 @@ import httpx
 logger = logging.getLogger("AutoBidder")
 
 class AutoBidderSchedulerMixin:
-    def _should_skip_user(self, user_id: int, settings: Dict) -> bool:
+    def _should_skip_user(self, user_id: int, settings: Dict):
         """Check if user should be skipped due to frequency limits or backoff"""
         current_time = datetime.now()
         
@@ -18,8 +18,9 @@ class AutoBidderSchedulerMixin:
         if user_id in self._user_backoff_until:
             if current_time < self._user_backoff_until[user_id]:
                 remaining_backoff = (self._user_backoff_until[user_id] - current_time).total_seconds() / 60
-                logger.info(f"⏸️  User {user_id}: In backoff period - {remaining_backoff:.1f}m remaining")
-                return True
+                reason = f"In backoff period - {remaining_backoff:.1f}m remaining"
+                logger.info(f"⏸️  User {user_id}: {reason}")
+                return True, reason
             else:
                 # Backoff period ended, reset retry count
                 del self._user_backoff_until[user_id]
@@ -32,14 +33,15 @@ class AutoBidderSchedulerMixin:
             time_since_last_bid = (current_time - last_bid_time).total_seconds() / 60
             if time_since_last_bid < settings["frequency_minutes"]:
                 remaining_minutes = settings["frequency_minutes"] - time_since_last_bid
-                logger.info(f"⏰ User {user_id}: Skipping - {time_since_last_bid:.1f}m since last bid, need {settings['frequency_minutes']}m (wait {remaining_minutes:.1f}m more)")
-                return True
+                reason = f"Wait {remaining_minutes:.1f}m more ({time_since_last_bid:.1f}m since last bid, frequency: {settings['frequency_minutes']}m)"
+                logger.info(f"⏰ User {user_id}: Skipping - {reason}")
+                return True, reason
             else:
                 logger.info(f"✅ User {user_id}: Ready to bid - {time_since_last_bid:.1f}m since last bid (frequency: {settings['frequency_minutes']}m)")
         else:
             logger.info(f"🆕 User {user_id}: First bid attempt (frequency: {settings['frequency_minutes']}m)")
         
-        return False
+        return False, None
 
     def _handle_user_failure(self, user_id: int):
         """Handle consecutive failures with fixed 5-minute backoff"""
@@ -81,6 +83,7 @@ class AutoBidderSchedulerMixin:
             "successful_bids": 0,
             "failed_users": 0,
             "skipped_users": 0,
+            "details": {},
             "timestamp": datetime.now().isoformat()
         }
         
@@ -117,8 +120,10 @@ class AutoBidderSchedulerMixin:
                 }
                 
                 # Check if user should be skipped due to frequency limits
-                if self._should_skip_user(user_id, settings):
+                should_skip, reason = self._should_skip_user(user_id, settings)
+                if should_skip:
                     results_summary["skipped_users"] += 1
+                    results_summary["details"][user_id] = reason
                     continue
                 
                 logger.info(f"🔄 Adding User {user_id} to parallel processing queue")
@@ -148,26 +153,33 @@ class AutoBidderSchedulerMixin:
                         logger.error(f"❌ User {user_id}: Exception during parallel processing: {result}")
                         self._handle_user_failure(user_id)
                         results_summary["failed_users"] += 1
+                        results_summary["details"][user_id] = f"Error: {str(result)}"
                     elif result is True:  # Successful bid
                         self._user_last_bid_time[user_id] = current_time
                         self._handle_user_success(user_id)
                         results_summary["successful_bids"] += 1
+                        results_summary["details"][user_id] = "Successful bid"
                         logger.info(f"✅ User {user_id}: Successful bid placed in parallel processing")
                     elif result == "BID_LIMIT_REACHED":
                         logger.error(f"🚫 User {user_id}: Bid limit reached")
                         results_summary["failed_users"] += 1
+                        results_summary["details"][user_id] = "Bid limit reached"
                     elif result == "CREDENTIALS_EXPIRED":
                         logger.error(f"🔐 User {user_id}: Credentials expired")
                         results_summary["failed_users"] += 1
+                        results_summary["details"][user_id] = "Credentials expired"
                     elif result == "ACCOUNT_RESTRICTED":
                         logger.error(f"⛔ User {user_id}: Account restricted by Freelancer.com")
                         results_summary["failed_users"] += 1
+                        results_summary["details"][user_id] = "Account restricted"
                     elif result in ["NO_PROJECTS_FOUND", "NO_MATCHING_PROJECTS", "NO_BIDS_PLACED"]:
                         logger.info(f"⏸️  User {user_id}: {result.replace('_', ' ').capitalize()}")
                         results_summary["skipped_users"] += 1
+                        results_summary["details"][user_id] = result.replace('_', ' ').capitalize()
                     else:
                         logger.info(f"ℹ️  User {user_id}: No bid placed this cycle")
                         results_summary["skipped_users"] += 1
+                        results_summary["details"][user_id] = str(result) if result else "No bids placed"
                 
                 logger.info(f"📊 Batch complete: {results_summary['successful_bids']}/{len(tasks)} users placed successful bids")
             else:
