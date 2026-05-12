@@ -201,6 +201,7 @@ class BidHistory(Base):
     proposal_text = Column(Text, nullable=True)
     status = Column(String, nullable=False)  # 'success', 'failed', 'pending'
     error_message = Column(Text, nullable=True)
+    platform = Column(String, nullable=True, default='freelancer')
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationship
@@ -342,3 +343,25 @@ class ClosedDeal(Base):
     # Relationships
     user = relationship("User")
     bid_history = relationship("BidHistory")
+
+
+class TruelancerAutoBidSettings(Base):
+    __tablename__ = "truelancer_auto_bid_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+
+    enabled = Column(Boolean, default=False)
+    daily_bids = Column(Integer, default=10)
+    frequency_minutes = Column(Integer, default=15)
+    min_skill_match = Column(Integer, default=1)
+    max_competition = Column(Integer, default=50)
+    smart_bidding = Column(Boolean, default=True)
+    proposal_type = Column(Integer, default=1)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationship
+    user = relationship("User")
+

@@ -6,7 +6,7 @@ Mirrors the pattern used in routers/guru.py and routers/users.py (Freelancer sec
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, case
 from typing import Optional
 from datetime import datetime, timedelta
 import os
@@ -14,9 +14,11 @@ import httpx
 import json
 
 from database import SessionLocal
-from models import User, Lead, BidHistory, TruelancerCredentials
+from models import User, Lead, BidHistory, TruelancerCredentials, TruelancerAutoBidSettings
+from schemas import TruelancerAutoBidSettings as TruelancerAutoBidSettingsSchema
 from core.dependencies import get_db, get_user_by_email
 from auth_utils import verify_token
+from truelancer_autobid_service import truelancer_bidder
 
 router = APIRouter()
 
@@ -263,6 +265,80 @@ async def disconnect_truelancer(
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to disconnect Truelancer")
 
+
+
+# ── Settings ──────────────────────────────────────────────────
+
+@router.get("/api/truelancer/settings")
+async def get_truelancer_settings(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get current Truelancer AutoBidder settings from database"""
+    user = get_user_by_email(email, db)
+    
+    # Get settings from database or create default
+    db_settings = db.query(TruelancerAutoBidSettings).filter(TruelancerAutoBidSettings.user_id == user.id).first()
+    if not db_settings:
+        db_settings = TruelancerAutoBidSettings(user_id=user.id)
+        db.add(db_settings)
+        db.commit()
+        db.refresh(db_settings)
+    
+    return {
+        "enabled": db_settings.enabled,
+        "daily_bids": db_settings.daily_bids,
+        "frequency_minutes": db_settings.frequency_minutes,
+        "min_skill_match": db_settings.min_skill_match,
+        "max_competition": db_settings.max_competition,
+        "smart_bidding": db_settings.smart_bidding,
+        "proposal_type": db_settings.proposal_type
+    }
+
+@router.post("/api/truelancer/settings")
+async def update_truelancer_settings(
+    settings: TruelancerAutoBidSettingsSchema,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Update Truelancer AutoBidder settings in database"""
+    user = get_user_by_email(email, db)
+    
+    # Get or create settings
+    db_settings = db.query(TruelancerAutoBidSettings).filter(TruelancerAutoBidSettings.user_id == user.id).first()
+    if not db_settings:
+        db_settings = TruelancerAutoBidSettings(user_id=user.id)
+        db.add(db_settings)
+    
+    # Update fields
+    if settings.enabled is not None:
+        db_settings.enabled = settings.enabled
+    if settings.daily_bids is not None:
+        db_settings.daily_bids = settings.daily_bids
+    if settings.frequency_minutes is not None:
+        db_settings.frequency_minutes = settings.frequency_minutes
+    if settings.min_skill_match is not None:
+        db_settings.min_skill_match = settings.min_skill_match
+    if settings.max_competition is not None:
+        db_settings.max_competition = settings.max_competition
+    if settings.smart_bidding is not None:
+        db_settings.smart_bidding = settings.smart_bidding
+    if settings.proposal_type is not None:
+        db_settings.proposal_type = settings.proposal_type
+    
+    db_settings.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(db_settings)
+    
+    return {
+        "enabled": db_settings.enabled,
+        "daily_bids": db_settings.daily_bids,
+        "frequency_minutes": db_settings.frequency_minutes,
+        "min_skill_match": db_settings.min_skill_match,
+        "max_competition": db_settings.max_competition,
+        "smart_bidding": db_settings.smart_bidding,
+        "proposal_type": db_settings.proposal_type
+    }
 
 # ── Projects ──────────────────────────────────────────────────
 
@@ -693,7 +769,8 @@ async def place_truelancer_bid(
                 project_url=bid_request.get("project_url"),
                 bid_amount=float(amount),
                 proposal_text=description,
-                status="success"
+                status="success",
+                platform="truelancer"
             )
             db.add(history)
             db.commit()
@@ -707,6 +784,23 @@ async def place_truelancer_bid(
 
 # ── Auto-bid stats & history ──────────────────────────────────
 
+@router.get("/api/truelancer/autobid/run-cycle")
+async def run_truelancer_autobid_cycle():
+    """Trigger a single bidding cycle for all enabled Truelancer users (for Cron jobs)"""
+    try:
+        results = await truelancer_bidder.run_cycle_batch()
+        return {
+            "success": True,
+            "results": results
+        }
+    except Exception as e:
+        print(f"Error running Truelancer autobid cycle: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 @router.get("/api/truelancer/autobid/stats")
 async def get_truelancer_autobid_stats(
     email: str = Depends(verify_token),
@@ -715,43 +809,76 @@ async def get_truelancer_autobid_stats(
     if db is None:
         return {"bids_today": 0, "bids_week": 0, "success_week": 0, "total_bids": 0, "success_rate": 0, "is_running": False}
     try:
-        user = db.query(User).filter(User.email == email).first()
-        if not user:
-            return {"bids_today": 0, "bids_week": 0, "success_week": 0, "total_bids": 0, "success_rate": 0, "is_running": False}
-
+        user = get_user_by_email(email, db)
+        
         now = datetime.utcnow()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=today_start.weekday())
 
-        total_bids = db.query(BidHistory).filter(BidHistory.user_id == user.id).count()
+        # Get stats from BidHistory
+        row = db.query(
+            func.count(case((BidHistory.created_at >= today_start, 1), else_=None)).label('bids_today'),
+            func.count(case((BidHistory.created_at >= week_start, 1), else_=None)).label('bids_week'),
+            func.count(case(((BidHistory.created_at >= week_start) & func.lower(BidHistory.status).in_(['success', 'accepted', 'awarded']), 1), else_=None)).label('success_week'),
+            func.count(case(((BidHistory.created_at >= week_start) & func.lower(BidHistory.status).in_(['failed', 'rejected', 'declined', 'error']), 1), else_=None)).label('failed_week'),
+            func.coalesce(func.sum(case((BidHistory.created_at >= today_start, BidHistory.bid_amount), else_=None)), 0).label('amount_today'),
+            func.coalesce(func.sum(case((BidHistory.created_at >= week_start, BidHistory.bid_amount), else_=None)), 0).label('amount_week'),
+        ).filter(BidHistory.user_id == user.id, BidHistory.platform == "truelancer").first()
 
-        bids_today = db.query(BidHistory).filter(
-            BidHistory.user_id == user.id,
-            BidHistory.created_at >= today_start
-        ).count()
-
-        bids_this_week = db.query(BidHistory).filter(
-            BidHistory.user_id == user.id,
-            BidHistory.created_at >= week_start
-        ).count()
-
-        success_total = db.query(BidHistory).filter(
-            BidHistory.user_id == user.id,
-            func.lower(BidHistory.status).in_(["success", "accepted", "awarded"])
-        ).count()
-
-        success_rate = round((success_total / total_bids * 100), 1) if total_bids > 0 else 0
+        # Get settings status
+        settings = db.query(TruelancerAutoBidSettings).filter(TruelancerAutoBidSettings.user_id == user.id).first()
+        is_running = settings.enabled if settings else False
 
         return {
-            "total_bids": total_bids,
-            "bids_today": bids_today,
-            "bids_this_week": bids_this_week,
-            "success_rate": success_rate,
-            "is_running": False,
+            "bids_today": row.bids_today or 0,
+            "bids_week": row.bids_week or 0,
+            "success_week": row.success_week or 0,
+            "failed_week": row.failed_week or 0,
+            "bid_amount_today": float(row.amount_today or 0),
+            "bid_amount_week": float(row.amount_week or 0),
+            "is_running": is_running
         }
     except Exception as e:
         print(f"❌ [TRUELANCER] Error calculating stats: {e}")
-        return {"bids_today": 0, "bids_this_week": 0, "total_bids": 0, "success_rate": 0, "is_running": False}
+        return {
+            "bids_today": 0, "bids_week": 0, "success_week": 0, "failed_week": 0,
+            "bid_amount_today": 0, "bid_amount_week": 0, "is_running": False
+        }
+
+@router.get("/api/truelancer/autobid/history")
+async def get_truelancer_autobid_history(
+    limit: int = 10,
+    offset: int = 0,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get Truelancer bidding history with pagination"""
+    user = get_user_by_email(email, db)
+    
+    total = db.query(BidHistory).filter(BidHistory.user_id == user.id, BidHistory.platform == "truelancer").count()
+    history = db.query(BidHistory).filter(BidHistory.user_id == user.id, BidHistory.platform == "truelancer")\
+        .order_by(BidHistory.created_at.desc())\
+        .offset(offset)\
+        .limit(limit)\
+        .all()
+    
+    return {
+        "total": total,
+        "history": [
+            {
+                "id": h.id,
+                "project_id": h.project_id,
+                "project_title": h.project_title,
+                "project_url": h.project_url,
+                "bid_amount": h.bid_amount,
+                "bid_time": h.created_at.isoformat() if h.created_at else None,
+                "status": h.status,
+                "error": h.error,
+                "proposal_text": h.proposal_text
+            }
+            for h in history
+        ]
+    }
 
 
 @router.post("/api/truelancer/autobid/start")
@@ -759,6 +886,14 @@ async def start_truelancer_autobid(
     email: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
+    user = get_user_by_email(email, db)
+    settings = db.query(TruelancerAutoBidSettings).filter(TruelancerAutoBidSettings.user_id == user.id).first()
+    if not settings:
+        settings = TruelancerAutoBidSettings(user_id=user.id, enabled=True)
+        db.add(settings)
+    else:
+        settings.enabled = True
+    db.commit()
     return {"success": True, "message": "Truelancer auto-bid started"}
 
 
@@ -767,6 +902,11 @@ async def stop_truelancer_autobid(
     email: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
+    user = get_user_by_email(email, db)
+    settings = db.query(TruelancerAutoBidSettings).filter(TruelancerAutoBidSettings.user_id == user.id).first()
+    if settings:
+        settings.enabled = False
+        db.commit()
     return {"success": True, "message": "Truelancer auto-bid stopped"}
 
 

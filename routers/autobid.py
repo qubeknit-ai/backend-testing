@@ -87,7 +87,7 @@ async def get_autobid_stats(email: str = Depends(verify_token), db: Session = De
                 func.sum(case((BidHistory.created_at >= week_start, BidHistory.bid_amount), else_=None)),
                 0
             ).label('amount_week'),
-        ).filter(BidHistory.user_id == user.id).first()
+        ).filter(BidHistory.user_id == user.id, (BidHistory.platform == "freelancer") | (BidHistory.platform.is_(None))).first()
 
         # Separate small query for settings (different table, unavoidable)
         settings = db.query(AutoBidSettings.enabled).filter(AutoBidSettings.user_id == user.id).first()
@@ -285,7 +285,8 @@ async def save_bid_history(bid_data: dict, db: Session = Depends(get_db)):
         bid_amount=bid_data.get("bid_amount", 0),
         proposal_text=bid_data.get("proposal_text"),
         status=bid_data.get("status", "pending"),
-        error_message=bid_data.get("error_message")
+        error_message=bid_data.get("error_message"),
+        platform="freelancer"
     )
     
     db.add(history)
@@ -299,19 +300,16 @@ async def get_bid_history(
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0)
 ):
-    """Get bid history for current user with pagination"""
+    """Get AutoBidder history from database"""
     from models import BidHistory
     user = get_user_by_email(email, db)
     
-    # Get total count
-    total = db.query(BidHistory).filter(BidHistory.user_id == user.id).count()
-    
-    # Get paginated history
-    history = db.query(BidHistory).filter(
-        BidHistory.user_id == user.id
-    ).order_by(
-        BidHistory.created_at.desc()
-    ).offset(offset).limit(limit).all()
+    total = db.query(BidHistory).filter(BidHistory.user_id == user.id, (BidHistory.platform == "freelancer") | (BidHistory.platform.is_(None))).count()
+    history = db.query(BidHistory).filter(BidHistory.user_id == user.id, (BidHistory.platform == "freelancer") | (BidHistory.platform.is_(None)))\
+        .order_by(BidHistory.created_at.desc())\
+        .offset(offset)\
+        .limit(limit)\
+        .all()
     
     return {
         "history": [
