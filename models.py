@@ -250,15 +250,27 @@ class GuruCredentials(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
-    access_token = Column(Text, nullable=True)
+    
+    # Guru authentication data
+    access_token = Column(Text, nullable=True)  # JWT token
+    aspx_auth = Column(Text, nullable=True)     # ASPXAUTH cookie value
     csrf_token = Column(String, nullable=True)
     guru_user_id = Column(String, nullable=True)
+    
+    # Session cookies (stored as JSON)
+    cookies = Column(JSON, nullable=True)
+    
+    # Validation status
     is_validated = Column(Boolean, default=False)
     validated_username = Column(String, nullable=True)
     validated_email = Column(String, nullable=True)
+    
+    # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_validated = Column(DateTime, nullable=True)
+    
+    # Relationship
     user = relationship("User")
 
 

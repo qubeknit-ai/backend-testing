@@ -22,6 +22,13 @@ async def save_guru_credentials(
     db: Session = Depends(get_db)
 ):
     """Save or update Guru credentials (sent by Chrome extension)"""
+    print(f"DEBUG: Received Guru credentials for {email}")
+    print(f"DEBUG: aspx_auth present: {bool(data.get('aspx_auth'))}")
+    if data.get('cookies'):
+        print(f"DEBUG: cookies count: {len(data.get('cookies'))}")
+    else:
+        print("DEBUG: cookies missing or empty")
+    
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
     try:
@@ -31,24 +38,25 @@ async def save_guru_credentials(
 
         creds = db.query(GuruCredentials).filter(GuruCredentials.user_id == user.id).first()
         if creds:
-            if data.get("access_token"):
-                creds.access_token = data["access_token"]
-            if data.get("csrf_token"):
-                creds.csrf_token = data["csrf_token"]
-            if data.get("guru_user_id"):
+            print(f"DEBUG: Updating existing credentials for user {user.id}")
+            for key in ["access_token", "aspx_auth", "csrf_token", "cookies", "validated_username", "validated_email"]:
+                if key in data:
+                    setattr(creds, key, data[key])
+            
+            if "guru_user_id" in data:
                 creds.guru_user_id = str(data["guru_user_id"])
-            if data.get("validated_username"):
-                creds.validated_username = data["validated_username"]
-            if data.get("validated_email"):
-                creds.validated_email = data["validated_email"]
+            
             creds.is_validated = True
             creds.last_validated = datetime.utcnow()
             creds.updated_at = datetime.utcnow()
         else:
+            print(f"DEBUG: Creating new credentials for user {user.id}")
             creds = GuruCredentials(
                 user_id=user.id,
                 access_token=data.get("access_token"),
+                aspx_auth=data.get("aspx_auth"),
                 csrf_token=data.get("csrf_token"),
+                cookies=data.get("cookies"),
                 guru_user_id=str(data["guru_user_id"]) if data.get("guru_user_id") else None,
                 validated_username=data.get("validated_username"),
                 validated_email=data.get("validated_email"),
@@ -58,6 +66,10 @@ async def save_guru_credentials(
             db.add(creds)
 
         db.commit()
+        db.refresh(creds)
+        print(f"DEBUG: After sync - aspx_auth length: {len(creds.aspx_auth) if creds.aspx_auth else 0}")
+        print(f"DEBUG: After sync - cookies present: {bool(creds.cookies)}")
+        
         return {"success": True, "message": "Guru credentials saved"}
     except HTTPException:
         raise
