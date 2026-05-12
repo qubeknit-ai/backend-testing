@@ -317,8 +317,6 @@ async def update_truelancer_settings(
         db_settings.daily_bids = settings.daily_bids
     if settings.frequency_minutes is not None:
         db_settings.frequency_minutes = settings.frequency_minutes
-    if settings.min_skill_match is not None:
-        db_settings.min_skill_match = settings.min_skill_match
     if settings.max_competition is not None:
         db_settings.max_competition = settings.max_competition
     if settings.smart_bidding is not None:
