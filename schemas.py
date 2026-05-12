@@ -162,6 +162,9 @@ class AutoBidSettings(BaseModel):
     min_skill_match: Optional[int] = None
     proposal_type: Optional[int] = None
     commission_projects: Optional[bool] = None
+    payment_verified: Optional[bool] = None
+    min_hires: Optional[int] = None
+    min_budget: Optional[float] = None
 
 class ClosedDealCreate(BaseModel):
     bid_history_id: Optional[int] = None

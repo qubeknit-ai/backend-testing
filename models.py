@@ -221,6 +221,9 @@ class AutoBidSettings(Base):
     min_skill_match = Column(Integer, default=1)  # Minimum number of skills that must match
     proposal_type = Column(Integer, default=1)  # Proposal type: 1, 2, 3, or 4
     commission_projects = Column(Boolean, default=True)  # Include commission-based projects
+    payment_verified = Column(Boolean, default=False)  # Filter for clients with verified payment method
+    min_hires = Column(Integer, default=0)  # Filter for clients with at least N previous hires
+    min_budget = Column(Float, default=0.0)  # Filter minimum budget
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

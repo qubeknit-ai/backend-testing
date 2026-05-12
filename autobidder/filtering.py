@@ -383,6 +383,46 @@ class AutoBidderFilterMixin:
                 filter_stats["bid_count_rejected"] += 1
                 continue
 
+            # 5. Check payment verified
+            payment_verified_only = settings.get("payment_verified", False)
+            if payment_verified_only:
+                owner = project.get("owner", {})
+                status = owner.get("status", {})
+                is_verified = status.get("payment_verified", False)
+                if not is_verified:
+                    logger.info(f"⏭️  Skipping project: Client payment not verified")
+                    if "payment_rejected" not in filter_stats:
+                        filter_stats["payment_rejected"] = 0
+                    filter_stats["payment_rejected"] += 1
+                    continue
+
+            # 6. Check minimum hires
+            min_hires = settings.get("min_hires", 0)
+            if min_hires > 0:
+                owner = project.get("owner", {})
+                stats = owner.get("stats", {})
+                # 'reviews' is a good proxy for hires on Freelancer
+                reviews = stats.get("reviews", 0)
+                if reviews < min_hires:
+                    logger.info(f"⏭️  Skipping project: Client has {reviews} hires/reviews (min: {min_hires})")
+                    if "hires_rejected" not in filter_stats:
+                        filter_stats["hires_rejected"] = 0
+                    filter_stats["hires_rejected"] += 1
+                    continue
+
+            # 7. Check minimum budget
+            min_budget = settings.get("min_budget", 0.0)
+            if min_budget > 0:
+                budget = project.get("budget", {})
+                # Use minimum budget for filtering
+                proj_min_budget = budget.get("minimum", 0)
+                if proj_min_budget < min_budget:
+                    logger.info(f"⏭️  Skipping project: Budget ${proj_min_budget} below minimum ${min_budget}")
+                    if "budget_rejected" not in filter_stats:
+                        filter_stats["budget_rejected"] = 0
+                    filter_stats["budget_rejected"] += 1
+                    continue
+
             logger.info(f"🎯 Project PASSED all filters - adding to bid list")
             filtered.append(project)
             filter_stats["passed"] += 1
@@ -397,6 +437,12 @@ class AutoBidderFilterMixin:
             logger.info(f"   💼 Commission rejected: {filter_stats['commission_rejected']}")
         logger.info(f"   🎯 Skill rejected (<{min_skill_match} or <50%): {filter_stats['skill_rejected']}")
         logger.info(f"   📈 Bid count rejected (>{max_bids}): {filter_stats['bid_count_rejected']}")
+        if filter_stats.get('payment_rejected', 0) > 0:
+            logger.info(f"   💳 Payment not verified rejected: {filter_stats['payment_rejected']}")
+        if filter_stats.get('hires_rejected', 0) > 0:
+            logger.info(f"   👤 Min hires rejected: {filter_stats['hires_rejected']}")
+        if filter_stats.get('budget_rejected', 0) > 0:
+            logger.info(f"   💰 Min budget rejected: {filter_stats['budget_rejected']}")
         
         return filtered
 

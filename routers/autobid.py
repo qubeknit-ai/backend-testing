@@ -137,7 +137,11 @@ async def get_autobid_settings(email: str = Depends(verify_token), db: Session =
         "max_project_bids": db_settings.max_project_bids,
         "smart_bidding": db_settings.smart_bidding,
         "min_skill_match": getattr(db_settings, 'min_skill_match', 1),
-        "proposal_type": getattr(db_settings, 'proposal_type', 1)
+        "proposal_type": getattr(db_settings, 'proposal_type', 1),
+        "commission_projects": getattr(db_settings, 'commission_projects', True),
+        "payment_verified": getattr(db_settings, 'payment_verified', False),
+        "min_hires": getattr(db_settings, 'min_hires', 0),
+        "min_budget": getattr(db_settings, 'min_budget', 0.0)
     }
 
 @router.post("/api/autobid/settings")
@@ -175,6 +179,12 @@ async def update_autobid_settings(
         db_settings.proposal_type = settings.proposal_type
     if settings.commission_projects is not None:
         db_settings.commission_projects = settings.commission_projects
+    if settings.payment_verified is not None:
+        db_settings.payment_verified = settings.payment_verified
+    if settings.min_hires is not None:
+        db_settings.min_hires = settings.min_hires
+    if settings.min_budget is not None:
+        db_settings.min_budget = settings.min_budget
     
     db.commit()
     db.refresh(db_settings)
@@ -189,7 +199,10 @@ async def update_autobid_settings(
         "smart_bidding": db_settings.smart_bidding,
         "min_skill_match": db_settings.min_skill_match,
         "proposal_type": db_settings.proposal_type,
-        "commission_projects": db_settings.commission_projects
+        "commission_projects": db_settings.commission_projects,
+        "payment_verified": db_settings.payment_verified,
+        "min_hires": db_settings.min_hires,
+        "min_budget": db_settings.min_budget
     }
     autobidder.update_settings(settings_dict)
     
