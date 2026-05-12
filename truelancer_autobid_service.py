@@ -166,10 +166,11 @@ class TruelancerAutoBidder:
                 if not projects:
                     return "No recommended jobs found"
 
+                skip_counts = {"history": 0, "proposal_fail": 0, "bid_fail": 0}
                 for project in projects:
                     project_id = str(project.get("id"))
                     
-                    # Check if already bid
+                    # 1. Check history
                     exists = db.query(BidHistory).filter(
                         BidHistory.user_id == user_id,
                         BidHistory.project_id == project_id,
@@ -177,20 +178,19 @@ class TruelancerAutoBidder:
                     ).first()
                     
                     if exists:
-                        logger.info(f"⏭️  User {user_id}: Skipping '{project.get('title')}' - Already in history")
+                        skip_counts["history"] += 1
                         continue
                     
-                    # Competition filter was removed as requested
-                    
+                    # 2. Generate proposal
                     user_obj = db.query(User).filter(User.id == user_id).first()
                     logger.info(f"🧠 User {user_id}: Generating proposal for '{project.get('title')}'")
                     proposal_text = await self._generate_proposal(user_obj, project)
                     
                     if not proposal_text:
-                        logger.warning(f"❌ User {user_id}: Proposal generation failed for '{project.get('title')}'")
+                        skip_counts["proposal_fail"] += 1
                         continue
                     
-                    # Budget parsing
+                    # 3. Parse budget
                     budget_val = project.get("budget", 0)
                     if isinstance(budget_val, dict):
                         min_amt = budget_val.get("min", 100)
@@ -199,6 +199,7 @@ class TruelancerAutoBidder:
                     else:
                         amount = float(budget_val) if budget_val else 100
                     
+                    # 4. Place bid
                     success = await self._place_bid(creds, project, proposal_text, amount)
                     if success:
                         history = BidHistory(
@@ -216,9 +217,9 @@ class TruelancerAutoBidder:
                         logger.info(f"✅ User {user_id}: Successfully bid on '{project.get('title')}'")
                         return True
                     else:
-                        logger.warning(f"❌ User {user_id}: Bid failed for '{project.get('title')}'")
+                        skip_counts["bid_fail"] += 1
                     
-            return "All available projects were already bid on or failed"
+            return f"No bids placed. (History: {skip_counts['history']}, AI Fail: {skip_counts['proposal_fail']}, API Fail: {skip_counts['bid_fail']})"
         except Exception as e:
             logger.error(f"Error in User {user_id} cycle: {e}")
             return f"Error: {str(e)}"
@@ -233,14 +234,15 @@ class TruelancerAutoBidder:
         payload = {
             "user_id": user.id,
             "user_email": user.email,
-            "project": {
-                "id": project.get("id"),
-                "title": project.get("title"),
-                "description": project.get("description"),
-                "budget": project.get("budget"),
-                "skills": project.get("skills", []),
-                "link": project.get("link") or f"https://www.truelancer.com/freelance-project/{project.get('slug')}"
-            }
+            "id": project.get("id"),
+            "title": project.get("title"),
+            "description": project.get("description"),
+            "budget": {
+                "amount": project.get("budget"),
+                "currency": project.get("currency_symbol") or project.get("currency_code") or "USD"
+            },
+            "skills": project.get("skills", []),
+            "url": project.get("link") or f"https://www.truelancer.com/freelance-project/{project.get('slug')}"
         }
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
