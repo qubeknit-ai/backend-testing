@@ -170,7 +170,6 @@ class TruelancerAutoBidder:
                 for project in projects:
                     project_id = str(project.get("id"))
                     
-                    # 1. Check history
                     exists = db.query(BidHistory).filter(
                         BidHistory.user_id == user_id,
                         BidHistory.project_id == project_id,
@@ -181,7 +180,6 @@ class TruelancerAutoBidder:
                         skip_counts["history"] += 1
                         continue
                     
-                    # 2. Generate proposal
                     user_obj = db.query(User).filter(User.id == user_id).first()
                     logger.info(f"🧠 User {user_id}: Generating proposal for '{project.get('title')}'")
                     proposal_text = await self._generate_proposal(user_obj, project)
@@ -190,7 +188,7 @@ class TruelancerAutoBidder:
                         skip_counts["proposal_fail"] += 1
                         continue
                     
-                    # 3. Parse budget
+                    # Budget parsing
                     budget_val = project.get("budget", 0)
                     if isinstance(budget_val, dict):
                         min_amt = budget_val.get("min", 100)
@@ -199,7 +197,6 @@ class TruelancerAutoBidder:
                     else:
                         amount = float(budget_val) if budget_val else 100
                     
-                    # 4. Place bid
                     success = await self._place_bid(creds, project, proposal_text, amount)
                     if success:
                         history = BidHistory(
@@ -231,25 +228,40 @@ class TruelancerAutoBidder:
         if not webhook_url:
             return None
             
+        # Prepare payload EXACTLY like the backend endpoint /api/truelancer/generate-proposal
         payload = {
             "user_id": user.id,
             "user_email": user.email,
-            "id": project.get("id"),
-            "title": project.get("title"),
-            "description": project.get("description"),
-            "budget": {
-                "amount": project.get("budget"),
-                "currency": project.get("currency_symbol") or project.get("currency_code") or "USD"
-            },
-            "skills": project.get("skills", []),
-            "url": project.get("link") or f"https://www.truelancer.com/freelance-project/{project.get('slug')}"
+            "project": {
+                "id": project.get("id"),
+                "title": project.get("title"),
+                "description": project.get("description"),
+                "preview_description": project.get("preview_description", ""),
+                "url": project.get("link") or f"https://www.truelancer.com/freelance-project/{project.get('slug')}",
+                "budget": {
+                    "amount": project.get("budget"),
+                    "currency": project.get("currency_symbol") or project.get("currency_code") or "USD"
+                },
+                "posted_time": project.get("created_at"),
+                "bid_count": project.get("total_proposals", 0),
+                "skills": project.get("skills", []),
+                "client": {
+                    "name": project.get("fname", ""),
+                    "country": project.get("country_code", "")
+                }
+            }
         }
+        
+        headers = {"Content-Type": "application/json"}
+        api_key = os.getenv("N8N_WEBHOOK_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+            
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(webhook_url, json=payload)
+                resp = await client.post(webhook_url, json=payload, headers=headers)
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Robust parsing matching the UI
                     if isinstance(data, list) and len(data) > 0:
                         return data[0].get("proposal") or data[0].get("Proposal")
                     elif isinstance(data, dict):
