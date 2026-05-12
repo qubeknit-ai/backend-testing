@@ -45,8 +45,7 @@ class TruelancerAutoBidder:
         logger.info("Truelancer AutoBidder Loop Initiated")
         while self._is_running:
             try:
-                results = await self.run_cycle_batch()
-                # Wait 5 minutes between cycles
+                await self.run_cycle_batch()
                 await asyncio.sleep(300)
             except asyncio.CancelledError:
                 break
@@ -70,7 +69,6 @@ class TruelancerAutoBidder:
         }
         
         try:
-            # Fetch ALL enabled Truelancer auto-bid settings
             enabled_settings = db.query(TruelancerAutoBidSettings).filter(
                 TruelancerAutoBidSettings.enabled == True
             ).all()
@@ -96,9 +94,7 @@ class TruelancerAutoBidder:
                 # Create task for parallel execution
                 task = asyncio.create_task(self._run_user_cycle(user_id, setting))
                 tasks.append((user_id, task))
-                
-                # Small stagger
-                await asyncio.sleep(random.uniform(0.5, 1.5) if 'random' in globals() else 0.5)
+                await asyncio.sleep(random.uniform(0.5, 1.5))
             
             if tasks:
                 results = await asyncio.gather(*[t for _, t in tasks], return_exceptions=True)
@@ -173,6 +169,7 @@ class TruelancerAutoBidder:
                 for project in projects:
                     project_id = str(project.get("id"))
                     
+                    # Check if already bid
                     exists = db.query(BidHistory).filter(
                         BidHistory.user_id == user_id,
                         BidHistory.project_id == project_id,
@@ -183,17 +180,24 @@ class TruelancerAutoBidder:
                         logger.info(f"⏭️  User {user_id}: Skipping '{project.get('title')}' - Already in history")
                         continue
                     
-                    user = db.query(User).filter(User.id == user_id).first()
+                    # Competition filter was removed as requested
+                    
+                    user_obj = db.query(User).filter(User.id == user_id).first()
                     logger.info(f"🧠 User {user_id}: Generating proposal for '{project.get('title')}'")
-                    proposal_text = await self._generate_proposal(user, project)
+                    proposal_text = await self._generate_proposal(user_obj, project)
+                    
                     if not proposal_text:
                         logger.warning(f"❌ User {user_id}: Proposal generation failed for '{project.get('title')}'")
                         continue
                     
-                    budget = project.get("budget", {})
-                    min_amt = budget.get("min", 100)
-                    max_amt = budget.get("max", min_amt)
-                    amount = (min_amt + max_amt) / 2 if setting.smart_bidding else min_amt
+                    # Budget parsing
+                    budget_val = project.get("budget", 0)
+                    if isinstance(budget_val, dict):
+                        min_amt = budget_val.get("min", 100)
+                        max_amt = budget_val.get("max", min_amt)
+                        amount = (min_amt + max_amt) / 2 if setting.smart_bidding else min_amt
+                    else:
+                        amount = float(budget_val) if budget_val else 100
                     
                     success = await self._place_bid(creds, project, proposal_text, amount)
                     if success:
@@ -201,7 +205,7 @@ class TruelancerAutoBidder:
                             user_id=user_id,
                             project_id=project_id,
                             project_title=project.get("title", "Truelancer Project"),
-                            project_url=f"https://www.truelancer.com/freelance-project/{project.get('id')}",
+                            project_url=project.get("link") or f"https://www.truelancer.com/freelance-project/{project.get('slug')}",
                             bid_amount=float(amount),
                             proposal_text=proposal_text,
                             status="success",
@@ -209,9 +213,12 @@ class TruelancerAutoBidder:
                         )
                         db.add(history)
                         db.commit()
+                        logger.info(f"✅ User {user_id}: Successfully bid on '{project.get('title')}'")
                         return True
+                    else:
+                        logger.warning(f"❌ User {user_id}: Bid failed for '{project.get('title')}'")
                     
-            return "No suitable new projects found (all already in history)"
+            return "All available projects were already bid on or failed"
         except Exception as e:
             logger.error(f"Error in User {user_id} cycle: {e}")
             return f"Error: {str(e)}"
@@ -222,6 +229,7 @@ class TruelancerAutoBidder:
         webhook_url = os.getenv("FREELANCER_PROPOSAL_WEBHOOK_URL")
         if not webhook_url:
             return None
+            
         payload = {
             "user_id": user.id,
             "user_email": user.email,
@@ -229,8 +237,9 @@ class TruelancerAutoBidder:
                 "id": project.get("id"),
                 "title": project.get("title"),
                 "description": project.get("description"),
-                "budget": project.get("budget", {}),
+                "budget": project.get("budget"),
                 "skills": project.get("skills", []),
+                "link": project.get("link") or f"https://www.truelancer.com/freelance-project/{project.get('slug')}"
             }
         }
         try:
@@ -238,22 +247,31 @@ class TruelancerAutoBidder:
                 resp = await client.post(webhook_url, json=payload)
                 if resp.status_code == 200:
                     data = resp.json()
-                    return data.get("proposal")
-        except:
-            pass
+                    # Robust parsing matching the UI
+                    if isinstance(data, list) and len(data) > 0:
+                        return data[0].get("proposal") or data[0].get("Proposal")
+                    elif isinstance(data, dict):
+                        if data.get("data"):
+                            return data["data"].get("proposal") or data["data"].get("Proposal")
+                        return data.get("proposal") or data.get("Proposal")
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
         return None
 
     async def _place_bid(self, creds, project, proposal, amount):
         payload = {
             'proposal[job_id]': str(project.get("id")),
-            'proposal[job_currency]': project.get("budget", {}).get("currency", "USD"),
+            'proposal[job_currency]': project.get("currency_code", creds.currency or "USD"),
             'proposal[item]': '13',
             'proposal[details]': proposal,
             'proposal[total_amount]': str(amount),
             'proposal[deposit_amount]': str(amount),
             'proposal[notify_freelancer]': '1'
         }
-        headers = {"Authorization": f"Bearer {creds.access_token}", "Accept": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {creds.access_token}",
+            "Accept": "application/json"
+        }
         cookies = creds.cookies if isinstance(creds.cookies, dict) else {}
         files_payload = {k: (None, str(v)) for k, v in payload.items()}
         try:
@@ -264,9 +282,13 @@ class TruelancerAutoBidder:
                     cookies=cookies,
                     files=files_payload
                 )
-                return response.status_code == 200 and response.json().get("status") == 1
-        except:
-            pass
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get("status") == 1
+                else:
+                    logger.error(f"Truelancer API Error: {response.status_code} {response.text}")
+        except Exception as e:
+            logger.error(f"Placement error: {e}")
         return False
 
 truelancer_bidder = TruelancerAutoBidder()
