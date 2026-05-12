@@ -147,7 +147,7 @@ async def get_leads(
         )
         
         if platform:
-            query = query.filter(Lead.platform == platform)
+            query = query.filter(func.lower(Lead.platform) == platform.lower())
         if status:
             query = query.filter(Lead.status == status)
         
