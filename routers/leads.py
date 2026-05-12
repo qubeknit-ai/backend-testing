@@ -82,6 +82,9 @@ async def receive_leads_from_n8n(payload: dict, db: Session = Depends(get_db)):
                     except:
                         posted_time = None
                 
+                # Normalize proposal text from various possible keys
+                proposal_text = lead_data.get("proposal") or lead_data.get("Proposal") or lead_data.get("description", "")
+                
                 new_lead = Lead(
                     user_id=user_id,
                     platform=platform,
@@ -93,7 +96,7 @@ async def receive_leads_from_n8n(payload: dict, db: Session = Depends(get_db)):
                     status=lead_data.get("status", "Pending"),
                     score=str(lead_data.get("Score", lead_data.get("score", "—"))),
                     description=lead_data.get("description", ""),
-                    proposal=lead_data.get("Proposal", ""),
+                    proposal=proposal_text,
                     url=lead_data.get("url", "")
                 )
                 db.add(new_lead)
@@ -174,7 +177,8 @@ async def get_leads(
                     "status": lead.status,
                     "score": lead.score,
                     "description": lead.description,
-                    "Proposal": lead.proposal,
+                    "proposal": lead.proposal,
+                    "Proposal": lead.proposal,  # Keep for backward compatibility
                     "url": lead.url,
                     "avg_bid_price": lead.avg_bid_price,
                     "created_at": lead.created_at.isoformat() if lead.created_at else None,
@@ -217,8 +221,8 @@ async def update_lead_proposal(
         print(f"Status in proposal_data: {'status' in proposal_data}")
         print(f"Status value: {proposal_data.get('status')}")
         
-        # Update the proposal
-        lead.proposal = proposal_data.get("proposal", "")
+        # Update the proposal - check both keys
+        lead.proposal = proposal_data.get("proposal") or proposal_data.get("Proposal", lead.proposal)
         
         # Update status if provided
         if "status" in proposal_data:
@@ -295,7 +299,8 @@ async def approve_lead(
                             "status": lead.status,
                             "score": lead.score,
                             "description": lead.description,
-                            "Proposal": lead.proposal,
+                            "proposal": lead.proposal,
+                            "Proposal": lead.proposal,  # Backward compatibility
                             "url": lead.url,
                             "updated_at": lead.updated_at.isoformat() if lead.updated_at else None
                         }
