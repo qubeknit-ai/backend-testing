@@ -65,6 +65,7 @@ class TruelancerAutoBidder:
             "successful_bids": 0,
             "failed_users": 0,
             "skipped_users": 0,
+            "details": {},
             "timestamp": datetime.now().isoformat()
         }
         
@@ -89,6 +90,7 @@ class TruelancerAutoBidder:
                     minutes_since = (datetime.now() - last_bid).total_seconds() / 60
                     if minutes_since < setting.frequency_minutes:
                         results_summary["skipped_users"] += 1
+                        results_summary["details"][user_id] = f"Frequency limit: {minutes_since:.1f}m passed, need {setting.frequency_minutes}m"
                         continue
                 
                 # Create task for parallel execution
@@ -106,12 +108,15 @@ class TruelancerAutoBidder:
                     if isinstance(result, Exception):
                         logger.error(f"❌ User {user_id}: Exception: {result}")
                         results_summary["failed_users"] += 1
+                        results_summary["details"][user_id] = f"Error: {str(result)}"
                     elif result is True:
                         self._user_last_bid_time[user_id] = datetime.now()
                         results_summary["successful_bids"] += 1
                         results_summary["active_users"].append(user_id)
+                        results_summary["details"][user_id] = "Success"
                     else:
                         results_summary["skipped_users"] += 1
+                        results_summary["details"][user_id] = result or "Unknown skip"
             
             return results_summary
             
@@ -127,7 +132,7 @@ class TruelancerAutoBidder:
         try:
             creds = db.query(TruelancerCredentials).filter(TruelancerCredentials.user_id == user_id).first()
             if not creds or not creds.access_token:
-                return False
+                return "Truelancer not connected"
             
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
             bids_today = db.query(BidHistory).filter(
@@ -138,7 +143,7 @@ class TruelancerAutoBidder:
             ).count()
             
             if bids_today >= setting.daily_bids:
-                return "LIMIT_REACHED"
+                return f"Daily limit reached ({bids_today}/{setting.daily_bids})"
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
@@ -157,13 +162,13 @@ class TruelancerAutoBidder:
                 )
                 
                 if response.status_code != 200:
-                    return False
+                    return f"API Error: {response.status_code}"
                 
                 data = response.json()
                 projects = data.get("projects", {}).get("data", []) or data.get("data", [])
                 
                 if not projects:
-                    return "NO_PROJECTS"
+                    return "No recommended jobs found"
 
                 for project in projects:
                     project_id = str(project.get("id"))
@@ -207,10 +212,10 @@ class TruelancerAutoBidder:
                         db.commit()
                         return True
                     
-            return "NO_BID_PLACED"
+            return "No suitable new projects found (filtered by history or competition)"
         except Exception as e:
             logger.error(f"Error in User {user_id} cycle: {e}")
-            return False
+            return f"Error: {str(e)}"
         finally:
             db.close()
 
