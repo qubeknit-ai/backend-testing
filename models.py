@@ -364,3 +364,23 @@ class TruelancerAutoBidSettings(Base):
     # Relationship
     user = relationship("User")
 
+
+class GuruAutoBidSettings(Base):
+    __tablename__ = "guru_auto_bid_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+
+    enabled = Column(Boolean, default=False)
+    daily_bids = Column(Integer, default=10)
+    frequency_minutes = Column(Integer, default=15)
+    smart_bidding = Column(Boolean, default=True)
+    skill_matching = Column(Boolean, default=True)
+    proposal_type = Column(Integer, default=1)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationship
+    user = relationship("User")
+
