@@ -171,6 +171,7 @@ class TruelancerAutoBidSettings(BaseModel):
     daily_bids: Optional[int] = None
     frequency_minutes: Optional[int] = None
     smart_bidding: Optional[bool] = None
+    skill_matching: Optional[bool] = None
     proposal_type: Optional[int] = None
 
 

@@ -290,6 +290,7 @@ async def get_truelancer_settings(
         "daily_bids": db_settings.daily_bids,
         "frequency_minutes": db_settings.frequency_minutes,
         "smart_bidding": db_settings.smart_bidding,
+        "skill_matching": db_settings.skill_matching,
         "proposal_type": db_settings.proposal_type
     }
 
@@ -317,6 +318,8 @@ async def update_truelancer_settings(
         db_settings.frequency_minutes = settings.frequency_minutes
     if settings.smart_bidding is not None:
         db_settings.smart_bidding = settings.smart_bidding
+    if settings.skill_matching is not None:
+        db_settings.skill_matching = settings.skill_matching
     if settings.proposal_type is not None:
         db_settings.proposal_type = settings.proposal_type
     
@@ -329,6 +332,7 @@ async def update_truelancer_settings(
         "daily_bids": db_settings.daily_bids,
         "frequency_minutes": db_settings.frequency_minutes,
         "smart_bidding": db_settings.smart_bidding,
+        "skill_matching": db_settings.skill_matching,
         "proposal_type": db_settings.proposal_type
     }
 

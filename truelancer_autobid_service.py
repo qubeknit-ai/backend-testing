@@ -153,7 +153,7 @@ class TruelancerAutoBidder:
                         "page": 1,
                         "per_page": 20,
                         "sort": "newest",
-                        "skill_matching": True
+                        "skill_matching": setting.skill_matching
                     }
                 )
                 
