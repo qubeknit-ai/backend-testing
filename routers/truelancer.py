@@ -380,6 +380,41 @@ async def get_truelancer_projects(
         raise HTTPException(status_code=500, detail="Failed to fetch Truelancer projects")
 
 
+@router.get("/api/truelancer/project-native-budget")
+async def get_project_native_budget(
+    id: int,
+    slug: str,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Fetch the native budget (e.g. INR) by scraping the project page."""
+    try:
+        url = f"https://www.truelancer.com/freelance-project/{slug}-{id}"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            if response.status_code != 200:
+                # Try without ID if it fails (sometimes slug includes ID or vice versa)
+                url = f"https://www.truelancer.com/freelance-project/{slug}"
+                response = await client.get(url)
+            
+            if response.status_code == 200:
+                import re
+                html = response.text
+                # Look for budget pattern like ₹ 5000 or $ 100
+                # Truelancer usually has <span class="budget-value"> or similar
+                # But a simple regex for currency symbols might work
+                match = re.search(r'(₹|\$|£|€)\s?([\d,]+)', html)
+                if match:
+                    return {
+                        "native_budget": match.group(2).replace(',', ''),
+                        "native_currency": match.group(1),
+                        "success": True
+                    }
+        
+        return {"success": False, "error": "Could not find native budget"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 @router.get("/api/truelancer/recommended-jobs")
 async def get_truelancer_recommended_jobs(
     email: str = Depends(verify_token),

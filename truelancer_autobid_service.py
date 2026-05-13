@@ -163,6 +163,10 @@ class TruelancerAutoBidder:
                 data = response.json()
                 projects = data.get("projects", {}).get("data", []) or data.get("data", [])
                 
+                if len(projects) > 0:
+                    logger.info(f"DEBUG: First Project Keys: {list(projects[0].keys())}")
+                    logger.info(f"DEBUG: First Project Budget: {projects[0].get('budget')}, Currency: {projects[0].get('currency')}, CurrencyCode: {projects[0].get('currency_code')}")
+
                 if not projects:
                     return "No recommended jobs found"
 
@@ -202,7 +206,15 @@ class TruelancerAutoBidder:
                         except Exception as e:
                             logger.warning(f"Could not parse project date {created_at_str}: {e}")
                     
-                    # 3. Proposal generation
+                    # 3. Fetch Native Budget (Real Currency)
+                    native_data = await self._get_native_budget(project)
+                    if native_data:
+                        logger.info(f"💎 Found Native Budget for {project_id}: {native_data['currency']} {native_data['budget']}")
+                        project['budget'] = native_data['budget']
+                        project['currency'] = native_data['currency']
+                        project['currency_code'] = native_data['currency_code']
+
+                    # 4. Proposal generation
                     user_obj = db.query(User).filter(User.id == user_id).first()
                     logger.info(f"🧠 User {user_id}: Generating proposal for '{project.get('title')}'")
                     proposal_text = await self._generate_proposal(user_obj, project, creds.currency)
@@ -305,6 +317,38 @@ class TruelancerAutoBidder:
                         return data.get("proposal") or data.get("Proposal")
         except Exception as e:
             logger.error(f"Webhook error: {e}")
+        return None
+
+    async def _get_native_budget(self, project):
+        """Fetch the native budget (e.g. INR) by scraping the project page."""
+        try:
+            project_id = project.get("id")
+            slug = project.get("slug")
+            if not project_id or not slug:
+                return None
+                
+            url = f"https://www.truelancer.com/freelance-project/{slug}-{project_id}"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+                if response.status_code != 200:
+                    url = f"https://www.truelancer.com/freelance-project/{slug}"
+                    response = await client.get(url)
+                
+                if response.status_code == 200:
+                    import re
+                    html = response.text
+                    match = re.search(r'(₹|\$|£|€)\s?([\d,]+)', html)
+                    if match:
+                        symbol = match.group(1)
+                        # Map symbols to codes for bidding API
+                        code_map = {'₹': 'INR', '$': 'USD', '£': 'GBP', '€': 'EUR'}
+                        return {
+                            "budget": float(match.group(2).replace(',', '')),
+                            "currency": symbol,
+                            "currency_code": code_map.get(symbol, 'USD')
+                        }
+        except Exception as e:
+            logger.error(f"Scraping error for {project.get('id')}: {e}")
         return None
 
     async def _place_bid(self, creds, project, proposal, amount):
