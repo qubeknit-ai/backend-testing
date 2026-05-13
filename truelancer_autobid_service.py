@@ -263,8 +263,14 @@ class TruelancerAutoBidder:
                         logger.info(f"✅ [AUTOBID] User {user_id}: Successfully bid on '{project.get('title')}' with {amount} {project.get('currency_code')}")
                         return True
                     else:
-                        logger.warn(f"❌ [AUTOBID] User {user_id}: Bid failed for '{project.get('title')}'")
+                        error_msg = getattr(self, '_last_error', 'Bid failed')
+                        logger.warn(f"❌ [AUTOBID] User {user_id}: Bid failed for '{project.get('title')}'. Reason: {error_msg}")
                         skip_counts["bid_fail"] += 1
+                        
+                        # Special handling for profile completion error - might want to notify user
+                        if "complete your profile" in error_msg.lower():
+                            # We can keep trying other projects, but they will likely all fail
+                            pass
                 
                 # If we reach here, no bid was placed
                 reasons = []
@@ -372,21 +378,28 @@ class TruelancerAutoBidder:
     async def _get_native_budget(self, project):
         """Fetch the native budget (e.g. INR) by scraping the project page."""
         try:
-            project_id = project.get("id")
-            slug = project.get("slug")
-            if not project_id or not slug:
-                return None
+            # Use the 'link' field if available, as it's the most reliable URL
+            url = project.get("link")
+            if not url:
+                project_id = project.get("id")
+                slug = project.get("slug")
+                if not project_id or not slug:
+                    return None
+                url = f"https://www.truelancer.com/freelance-project/{slug}-{project_id}"
                 
-            url = f"https://www.truelancer.com/freelance-project/{slug}-{project_id}"
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url)
-                if response.status_code != 200:
-                    url = f"https://www.truelancer.com/freelance-project/{slug}"
-                    response = await client.get(url)
+                if response.status_code != 200 and not project.get("link"):
+                    # Fallback URL if first attempt failed and we didn't have a direct link
+                    slug = project.get("slug")
+                    if slug:
+                        url = f"https://www.truelancer.com/freelance-project/{slug}"
+                        response = await client.get(url)
                 
                 if response.status_code == 200:
                     import re
                     html = response.text
+                    # Look for budget pattern like ₹ 5000 or $ 100
                     match = re.search(r'(₹|\$|£|€)\s?([\d,]+)', html)
                     if match:
                         symbol = match.group(1)
@@ -441,12 +454,17 @@ class TruelancerAutoBidder:
                     if data.get("status") == 1:
                         return True
                     else:
-                        logger.error(f"❌ [AUTOBID] Truelancer API logical error: {data.get('message', 'Unknown error')}")
+                        error_msg = data.get('message', 'Unknown error')
+                        logger.error(f"❌ [AUTOBID] Truelancer API logical error: {error_msg}")
+                        self._last_error = error_msg
                         return False
                 else:
+                    error_msg = f"HTTP {response.status_code}"
                     logger.error(f"❌ [AUTOBID] Truelancer API HTTP Error: {response.status_code} - {response.text}")
+                    self._last_error = error_msg
         except Exception as e:
             logger.error(f"Placement error: {e}")
+            self._last_error = str(e)
         return False
 
 truelancer_bidder = TruelancerAutoBidder()
