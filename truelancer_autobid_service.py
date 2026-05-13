@@ -205,7 +205,7 @@ class TruelancerAutoBidder:
                     # 3. Proposal generation
                     user_obj = db.query(User).filter(User.id == user_id).first()
                     logger.info(f"🧠 User {user_id}: Generating proposal for '{project.get('title')}'")
-                    proposal_text = await self._generate_proposal(user_obj, project)
+                    proposal_text = await self._generate_proposal(user_obj, project, creds.currency)
                     
                     if not proposal_text:
                         skip_counts["proposal_fail"] += 1
@@ -258,7 +258,7 @@ class TruelancerAutoBidder:
         finally:
             db.close()
 
-    async def _generate_proposal(self, user, project):
+    async def _generate_proposal(self, user, project, preferred_currency=None):
         webhook_url = os.getenv("FREELANCER_PROPOSAL_WEBHOOK_URL")
         if not webhook_url:
             return None
@@ -275,7 +275,7 @@ class TruelancerAutoBidder:
                 "url": project.get("link") or f"https://www.truelancer.com/freelance-project/{project.get('slug')}",
                 "budget": {
                     "amount": project.get("budget"),
-                    "currency": project.get("currency_symbol") or project.get("currency_code") or "USD"
+                    "currency": project.get("currency") or preferred_currency or project.get("currency_code") or "USD"
                 },
                 "posted_time": project.get("created_at"),
                 "bid_count": project.get("total_proposals", 0),
@@ -308,9 +308,12 @@ class TruelancerAutoBidder:
         return None
 
     async def _place_bid(self, creds, project, proposal, amount):
+        # Use project's display currency if available, then user's preference
+        bid_currency = project.get("currency") or creds.currency or project.get("currency_code") or "USD"
+        
         payload = {
             'proposal[job_id]': str(project.get("id")),
-            'proposal[job_currency]': project.get("currency_code", creds.currency or "USD"),
+            'proposal[job_currency]': bid_currency,
             'proposal[item]': '13',
             'proposal[details]': proposal,
             'proposal[total_amount]': str(amount),
