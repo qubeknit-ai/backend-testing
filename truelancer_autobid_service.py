@@ -209,10 +209,14 @@ class TruelancerAutoBidder:
                     # 3. Fetch Native Budget (Real Currency)
                     native_data = await self._get_native_budget(project)
                     if native_data:
-                        logger.info(f"💎 Found Native Budget for {project_id}: {native_data['currency']} {native_data['budget']}")
+                        logger.info(f"💎 [AUTOBID] Found Native Budget for {project_id}: {native_data['currency']} {native_data['budget']}")
                         project['budget'] = native_data['budget']
-                        project['currency'] = native_data['currency']
+                        project['currency'] = native_data['currency_code'] # Use code (INR) instead of symbol
                         project['currency_code'] = native_data['currency_code']
+                        project['is_enriched'] = True
+                    else:
+                        logger.info(f"⚠️ [AUTOBID] Native budget not found for {project_id}, using display value: {project.get('budget')} {project.get('currency')}")
+                        project['is_enriched'] = False
 
                     # 4. Proposal generation
                     user_obj = db.query(User).filter(User.id == user_id).first()
@@ -352,8 +356,14 @@ class TruelancerAutoBidder:
         return None
 
     async def _place_bid(self, creds, project, proposal, amount):
-        # Use project's display currency if available, then user's preference
-        bid_currency = project.get("currency") or creds.currency or project.get("currency_code") or "USD"
+        # If we enriched the project, use that currency code (e.g. INR)
+        # Otherwise, use the display currency (e.g. USD) that matches the original budget value
+        if project.get('is_enriched'):
+            bid_currency = project.get('currency_code') or 'INR'
+        else:
+            bid_currency = project.get('currency') or creds.currency or 'USD'
+            
+        logger.info(f"🚀 [AUTOBID] Placing bid on {project.get('id')}: {amount} {bid_currency}")
         
         payload = {
             'proposal[job_id]': str(project.get("id")),
