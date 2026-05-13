@@ -166,10 +166,11 @@ class TruelancerAutoBidder:
                 if not projects:
                     return "No recommended jobs found"
 
-                skip_counts = {"history": 0, "proposal_fail": 0, "bid_fail": 0}
+                skip_counts = {"history": 0, "proposal_fail": 0, "bid_fail": 0, "too_old": 0}
                 for project in projects:
                     project_id = str(project.get("id"))
                     
+                    # 1. History check
                     exists = db.query(BidHistory).filter(
                         BidHistory.user_id == user_id,
                         BidHistory.project_id == project_id,
@@ -179,7 +180,29 @@ class TruelancerAutoBidder:
                     if exists:
                         skip_counts["history"] += 1
                         continue
+
+                    # 2. Age check (No older than 48 hours)
+                    created_at_str = project.get("created_at")
+                    if created_at_str:
+                        try:
+                            p_date = None
+                            # Truelancer usually returns "YYYY-MM-DD HH:MM:SS"
+                            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S"):
+                                try:
+                                    p_date = datetime.strptime(created_at_str, fmt)
+                                    break
+                                except:
+                                    continue
+                            
+                            if p_date:
+                                # Compare with UTC now
+                                if datetime.utcnow() - p_date > timedelta(hours=48):
+                                    skip_counts["too_old"] += 1
+                                    continue
+                        except Exception as e:
+                            logger.warning(f"Could not parse project date {created_at_str}: {e}")
                     
+                    # 3. Proposal generation
                     user_obj = db.query(User).filter(User.id == user_id).first()
                     logger.info(f"🧠 User {user_id}: Generating proposal for '{project.get('title')}'")
                     proposal_text = await self._generate_proposal(user_obj, project)
@@ -188,7 +211,7 @@ class TruelancerAutoBidder:
                         skip_counts["proposal_fail"] += 1
                         continue
                     
-                    # Budget parsing
+                    # 4. Budget parsing
                     budget_val = project.get("budget", 0)
                     if isinstance(budget_val, dict):
                         min_amt = budget_val.get("min", 100)
@@ -197,6 +220,7 @@ class TruelancerAutoBidder:
                     else:
                         amount = float(budget_val) if budget_val else 100
                     
+                    # 5. Place bid
                     success = await self._place_bid(creds, project, proposal_text, amount)
                     if success:
                         history = BidHistory(
@@ -215,8 +239,19 @@ class TruelancerAutoBidder:
                         return True
                     else:
                         skip_counts["bid_fail"] += 1
-                    
-            return f"No bids placed. (History: {skip_counts['history']}, AI Fail: {skip_counts['proposal_fail']}, API Fail: {skip_counts['bid_fail']})"
+                
+                # If we reach here, no bid was placed
+                reasons = []
+                if skip_counts["history"] > 0: reasons.append(f"{skip_counts['history']} bidded")
+                if skip_counts["too_old"] > 0: reasons.append(f"{skip_counts['too_old']} too old (>48h)")
+                if skip_counts["proposal_fail"] > 0: reasons.append(f"{skip_counts['proposal_fail']} AI fail")
+                if skip_counts["bid_fail"] > 0: reasons.append(f"{skip_counts['bid_fail']} API fail")
+                
+                if skip_counts["too_old"] == len(projects):
+                    return "Failed: No projects found within the last 48 hours."
+                
+                return f"No bids placed. Reasons: {', '.join(reasons)}"
+
         except Exception as e:
             logger.error(f"Error in User {user_id} cycle: {e}")
             return f"Error: {str(e)}"
