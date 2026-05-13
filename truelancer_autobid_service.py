@@ -206,17 +206,26 @@ class TruelancerAutoBidder:
                         except Exception as e:
                             logger.warning(f"Could not parse project date {created_at_str}: {e}")
                     
-                    # 3. Fetch Native Budget (Real Currency)
-                    native_data = await self._get_native_budget(project)
-                    if native_data:
-                        logger.info(f"💎 [AUTOBID] Found Native Budget for {project_id}: {native_data['currency']} {native_data['budget']}")
-                        project['budget'] = native_data['budget']
-                        project['currency'] = native_data['currency_code'] # Use code (INR) instead of symbol
-                        project['currency_code'] = native_data['currency_code']
+                    # 3. Fetch Full Project Details (Real Currency)
+                    details = await self._fetch_full_details(creds.access_token, project_id)
+                    if details:
+                        logger.info(f"💎 [AUTOBID] Fetched Full Details for {project_id}: {details.get('currency_code')} {details.get('budget')}")
+                        project['budget'] = details.get('budget')
+                        project['currency'] = details.get('currency_code') or details.get('currency') or 'USD'
+                        project['currency_code'] = details.get('currency_code') or project['currency']
                         project['is_enriched'] = True
                     else:
-                        logger.info(f"⚠️ [AUTOBID] Native budget not found for {project_id}, using display value: {project.get('budget')} {project.get('currency')}")
-                        project['is_enriched'] = False
+                        # Fallback to scraping if API details fail
+                        native_data = await self._get_native_budget(project)
+                        if native_data:
+                            logger.info(f"💎 [AUTOBID] Found Native Budget via scraping for {project_id}: {native_data['currency']} {native_data['budget']}")
+                            project['budget'] = native_data['budget']
+                            project['currency'] = native_data['currency_code']
+                            project['currency_code'] = native_data['currency_code']
+                            project['is_enriched'] = True
+                        else:
+                            logger.info(f"⚠️ [AUTOBID] Native budget not found for {project_id}, using display value: {project.get('budget')} {project.get('currency')}")
+                            project['is_enriched'] = False
 
                     # 4. Proposal generation
                     user_obj = db.query(User).filter(User.id == user_id).first()
@@ -251,9 +260,10 @@ class TruelancerAutoBidder:
                         )
                         db.add(history)
                         db.commit()
-                        logger.info(f"✅ User {user_id}: Successfully bid on '{project.get('title')}'")
+                        logger.info(f"✅ [AUTOBID] User {user_id}: Successfully bid on '{project.get('title')}' with {amount} {project.get('currency_code')}")
                         return True
                     else:
+                        logger.warn(f"❌ [AUTOBID] User {user_id}: Bid failed for '{project.get('title')}'")
                         skip_counts["bid_fail"] += 1
                 
                 # If we reach here, no bid was placed
@@ -323,6 +333,42 @@ class TruelancerAutoBidder:
             logger.error(f"Webhook error: {e}")
         return None
 
+    async def _fetch_full_details(self, token, project_id):
+        """Fetch full project details from the API to get native budget/currency."""
+        try:
+            # We'll try the known details endpoint
+            url = f"https://api.truelancer.com/api/v1/user/project-details?id={project_id}"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json"
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    # Response structure can vary, but usually it's in 'data'
+                    p_data = data.get('data') or data.get('project') or data
+                    
+                    # Try to get budget and currency code from various possible fields
+                    budget = p_data.get('budget') or p_data.get('total_budget')
+                    currency_code = p_data.get('currency_code') or p_data.get('currency')
+                    
+                    # If currency is a symbol, map it to a code
+                    symbol_to_code = {'₹': 'INR', '$': 'USD', '£': 'GBP', '€': 'EUR'}
+                    if currency_code in symbol_to_code:
+                        currency_code = symbol_to_code[currency_code]
+                    
+                    if budget:
+                        return {
+                            "budget": budget,
+                            "currency_code": currency_code or 'USD'
+                        }
+                else:
+                    logger.debug(f"Project details API returned {response.status_code} for {project_id}")
+        except Exception as e:
+            logger.warn(f"Failed to fetch full details for {project_id}: {e}")
+        return None
+
     async def _get_native_budget(self, project):
         """Fetch the native budget (e.g. INR) by scraping the project page."""
         try:
@@ -358,18 +404,20 @@ class TruelancerAutoBidder:
     async def _place_bid(self, creds, project, proposal, amount):
         # If we enriched the project, use that currency code (e.g. INR)
         # Otherwise, use the display currency (e.g. USD) that matches the original budget value
+        # Ensure we have a valid currency code
         if project.get('is_enriched'):
             bid_currency = project.get('currency_code') or 'INR'
         else:
-            bid_currency = project.get('currency') or creds.currency or 'USD'
+            # Fallback to the code from the API if available, otherwise 'USD'
+            bid_currency = project.get('currency_code') or project.get('currency') or 'USD'
             
         logger.info(f"🚀 [AUTOBID] Placing bid on {project.get('id')}: {amount} {bid_currency}")
         
         payload = {
             'proposal[job_id]': str(project.get("id")),
-            'proposal[job_currency]': bid_currency,
+            'proposal[job_currency]': str(bid_currency),
             'proposal[item]': '13',
-            'proposal[details]': proposal,
+            'proposal[details]': str(proposal),
             'proposal[total_amount]': str(amount),
             'proposal[deposit_amount]': str(amount),
             'proposal[notify_freelancer]': '1'
@@ -390,9 +438,13 @@ class TruelancerAutoBidder:
                 )
                 if response.status_code == 200:
                     data = response.json()
-                    return data.get("status") == 1
+                    if data.get("status") == 1:
+                        return True
+                    else:
+                        logger.error(f"❌ [AUTOBID] Truelancer API logical error: {data.get('message', 'Unknown error')}")
+                        return False
                 else:
-                    logger.error(f"Truelancer API Error: {response.status_code} {response.text}")
+                    logger.error(f"❌ [AUTOBID] Truelancer API HTTP Error: {response.status_code} - {response.text}")
         except Exception as e:
             logger.error(f"Placement error: {e}")
         return False
