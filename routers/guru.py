@@ -6,7 +6,7 @@ AI proposal generation (same webhook as Truelancer), and milestone-based bid sub
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, case
 from typing import Optional
 from datetime import datetime, timedelta
 import os
