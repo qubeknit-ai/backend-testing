@@ -15,6 +15,7 @@ import json
 
 from database import SessionLocal
 from models import User, Lead, BidHistory, GuruCredentials, GuruAutoBidSettings
+from guru_autobid_service import guru_bidder
 from core.dependencies import get_db, get_user_by_email
 from auth_utils import verify_token
 
@@ -47,6 +48,7 @@ async def save_guru_credentials(
             if "guru_user_id" in data: creds.guru_user_id = str(data["guru_user_id"])
             if "validated_username" in data: creds.validated_username = data["validated_username"]
             if "validated_email" in data: creds.validated_email = data["validated_email"]
+            if "validated_picture_url" in data: creds.validated_picture_url = data["validated_picture_url"]
             creds.is_validated = True
             creds.last_validated = now
             creds.updated_at = now
@@ -60,6 +62,7 @@ async def save_guru_credentials(
                 guru_user_id=str(data["guru_user_id"]) if data.get("guru_user_id") else None,
                 validated_username=data.get("validated_username"),
                 validated_email=data.get("validated_email"),
+                validated_picture_url=data.get("validated_picture_url"),
                 is_validated=True,
                 last_validated=now
             )
@@ -100,6 +103,7 @@ async def get_guru_status(
                 "username": creds.validated_username,
                 "email": creds.validated_email,
                 "user_id": creds.guru_user_id,
+                "picture_url": creds.validated_picture_url,
                 "updated_at": creds.updated_at.isoformat() if creds.updated_at else None,
             }
 
@@ -728,40 +732,124 @@ async def get_guru_autobid_stats(
     db: Session = Depends(get_db)
 ):
     if db is None:
-        return {"bids_today": 0, "bids_week": 0, "success_week": 0, "total_bids": 0, "is_running": False}
+        return {"bids_today": 0, "bids_week": 0, "success_week": 0, "failed_week": 0, "bid_amount_today": 0, "bid_amount_week": 0, "is_running": False}
     try:
-        user = db.query(User).filter(User.email == email).first()
-        if not user:
-            return {"bids_today": 0, "total_bids": 0, "is_running": False}
-
+        user = get_user_by_email(email, db)
+        
         now = datetime.utcnow()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = today_start - timedelta(days=today_start.weekday())
 
-        base_query = db.query(BidHistory).filter(
-            BidHistory.user_id == user.id,
-            BidHistory.platform == "guru"
-        )
+        # Get stats from BidHistory
+        row = db.query(
+            func.count(case((BidHistory.created_at >= today_start, 1), else_=None)).label('bids_today'),
+            func.count(case((BidHistory.created_at >= week_start, 1), else_=None)).label('bids_week'),
+            func.count(case(((BidHistory.created_at >= week_start) & func.lower(BidHistory.status).in_(['success', 'accepted', 'awarded']), 1), else_=None)).label('success_week'),
+            func.count(case(((BidHistory.created_at >= week_start) & func.lower(BidHistory.status).in_(['failed', 'rejected', 'declined', 'error']), 1), else_=None)).label('failed_week'),
+            func.coalesce(func.sum(case((BidHistory.created_at >= today_start, BidHistory.bid_amount), else_=None)), 0).label('amount_today'),
+            func.coalesce(func.sum(case((BidHistory.created_at >= week_start, BidHistory.bid_amount), else_=None)), 0).label('amount_week'),
+        ).filter(BidHistory.user_id == user.id, BidHistory.platform == "guru").first()
 
-        total_bids = base_query.count()
-        bids_today = base_query.filter(BidHistory.created_at >= today_start).count()
+        # Get settings status
+        settings = db.query(GuruAutoBidSettings).filter(GuruAutoBidSettings.user_id == user.id).first()
+        is_running = settings.enabled if settings else False
 
         return {
-            "total_bids": total_bids,
-            "bids_today": bids_today,
-            "is_running": False
+            "bids_today": row.bids_today or 0,
+            "bids_week": row.bids_week or 0,
+            "success_week": row.success_week or 0,
+            "failed_week": row.failed_week or 0,
+            "bid_amount_today": float(row.amount_today or 0),
+            "bid_amount_week": float(row.amount_week or 0),
+            "is_running": is_running
         }
-    except Exception:
-        return {"bids_today": 0, "total_bids": 0, "is_running": False}
+    except Exception as e:
+        print(f"❌ [GURU] Error calculating stats: {e}")
+        return {
+            "bids_today": 0, "bids_week": 0, "success_week": 0, "failed_week": 0,
+            "bid_amount_today": 0, "bid_amount_week": 0, "is_running": False
+        }
+
+@router.get("/api/guru/autobid/history")
+async def get_guru_autobid_history(
+    limit: int = 10,
+    offset: int = 0,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get Guru bidding history with pagination"""
+    user = get_user_by_email(email, db)
+    
+    total = db.query(BidHistory).filter(BidHistory.user_id == user.id, BidHistory.platform == "guru").count()
+    history = db.query(BidHistory).filter(BidHistory.user_id == user.id, BidHistory.platform == "guru")\
+        .order_by(BidHistory.created_at.desc())\
+        .offset(offset)\
+        .limit(limit)\
+        .all()
+    
+    return {
+        "total": total,
+        "history": [
+            {
+                "id": h.id,
+                "project_id": h.project_id,
+                "project_title": h.project_title,
+                "project_url": h.project_url,
+                "bid_amount": h.bid_amount,
+                "bid_time": h.created_at.isoformat() if h.created_at else None,
+                "status": h.status,
+                "error": h.error_message,
+                "proposal_text": h.proposal_text
+            }
+            for h in history
+        ]
+    }
+
+
+@router.get("/api/guru/autobid/run-cycle")
+async def run_guru_autobid_cycle():
+    """Trigger a single bidding cycle for all enabled Guru users (for Cron jobs)"""
+    try:
+        results = await guru_bidder.run_cycle_batch()
+        return {
+            "success": True,
+            "results": results
+        }
+    except Exception as e:
+        print(f"Error running Guru autobid cycle: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 @router.post("/api/guru/autobid/start")
-async def start_guru_autobid(email: str = Depends(verify_token)):
-    return {"success": True, "message": "Guru auto-quote started"}
+async def start_guru_autobid(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    user = get_user_by_email(email, db)
+    settings = db.query(GuruAutoBidSettings).filter(GuruAutoBidSettings.user_id == user.id).first()
+    if not settings:
+        settings = GuruAutoBidSettings(user_id=user.id, enabled=True)
+        db.add(settings)
+    else:
+        settings.enabled = True
+    db.commit()
+    return {"success": True, "message": "Guru auto-bid started"}
 
 
 @router.post("/api/guru/autobid/stop")
-async def stop_guru_autobid(email: str = Depends(verify_token)):
-    return {"success": True, "message": "Guru auto-quote stopped"}
+async def stop_guru_autobid(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    user = get_user_by_email(email, db)
+    settings = db.query(GuruAutoBidSettings).filter(GuruAutoBidSettings.user_id == user.id).first()
+    if settings:
+        settings.enabled = False
+        db.commit()
+    return {"success": True, "message": "Guru auto-bid stopped"}
 
 
 # ── Stored Projects (leads table) ─────────────────────────────

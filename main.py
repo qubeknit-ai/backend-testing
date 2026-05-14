@@ -18,6 +18,7 @@ import time
 from schemas import UserSignup, UserLogin, Token, UserResponse, SettingsUpdate, SettingsResponse, UserProfileUpdate, TalentCreate, TalentUpdate, TalentResponse, FreelancerCredentialsCreate, FreelancerCredentialsResponse, FreelancerCredentialsUpdate, AutoBidSettings, ClosedDealCreate, ClosedDealUpdate, ClosedDealResponse
 from autobid_service import bidder as autobidder
 from truelancer_autobid_service import truelancer_bidder
+from guru_autobid_service import guru_bidder
 from autobidder.upwork_bidder import upwork_bidder
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token, SECRET_KEY, ALGORITHM
 
@@ -132,6 +133,7 @@ async def startup_event():
     start_cache_cleanup()
     # Auto-bidder settings are now loaded lazily when the first bid fires,
     # avoiding a DB hit on every cold start (which happens every few minutes on Vercel).
+    guru_bidder.start()
     print("✅ AK BPO backend started")
 
 @app.on_event("shutdown")
@@ -139,6 +141,7 @@ async def shutdown_event():
     autobidder.stop()
     upwork_bidder.stop()
     truelancer_bidder.stop()
+    guru_bidder.stop()
 
 
 

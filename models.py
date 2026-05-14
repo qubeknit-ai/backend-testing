@@ -268,6 +268,7 @@ class GuruCredentials(Base):
     is_validated = Column(Boolean, default=False)
     validated_username = Column(String, nullable=True)
     validated_email = Column(String, nullable=True)
+    validated_picture_url = Column(Text, nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
