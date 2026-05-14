@@ -182,7 +182,7 @@ class GuruAutoBidder:
                 if not projects:
                     return "No recommended jobs found"
 
-                skip_counts = {"history": 0, "proposal_fail": 0, "bid_fail": 0, "too_old": 0}
+                skip_counts = {"history": 0, "proposal_fail": 0, "bid_fail": 0, "too_old": 0, "too_many_quotes": 0}
                 for project in projects:
                     project_id = project.get("id")
                     
@@ -197,25 +197,20 @@ class GuruAutoBidder:
                         skip_counts["history"] += 1
                         continue
 
-                    # 2. Age check (No older than 48 hours)
+                    # 1.5 Quote check
+                    max_quotes = getattr(settings, 'max_quotes', 50)
+                    if project.get("total_proposals", 0) > max_quotes:
+                        skip_counts["too_many_quotes"] = skip_counts.get("too_many_quotes", 0) + 1
+                        continue
+
+                    # 2. Age check (Respect dynamic settings)
+                    max_hours = getattr(settings, 'max_project_age_hours', 48)
                     posted_at_str = project.get("posted_at")
                     if posted_at_str:
                         try:
-                            # Guru dates can be tricky, often "/Date(1715612345678)/"
-                            timestamp_match = re.search(r'\/Date\((\d+)\)\/', posted_at_str)
-                            if timestamp_match:
-                                p_date = datetime.fromtimestamp(int(timestamp_match.group(1)) / 1000.0)
-                            else:
-                                # Fallback to standard parsing
-                                p_date = None
-                                for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-                                    try:
-                                        p_date = datetime.strptime(posted_at_str, fmt)
-                                        break
-                                    except:
-                                        continue
-                            
-                            if p_date and datetime.utcnow() - p_date > timedelta(hours=48):
+                            # Our normalization now returns ISO strings
+                            p_date = datetime.fromisoformat(posted_at_str)
+                            if datetime.utcnow() - p_date > timedelta(hours=max_hours):
                                 skip_counts["too_old"] += 1
                                 continue
                         except:
@@ -388,15 +383,62 @@ class GuruAutoBidder:
         else:
             skills = []
 
+        # Posted time - Robust conversion
+        posted_at_raw = (
+            proj.get("PostedDate") or 
+            proj.get("DatePosted") or 
+            job.get("postedDate") or 
+            job.get("postDate") or 
+            job.get("createdDate") or 
+            job.get("datePosted") or 
+            proj.get("DatePostedFormatted") or
+            ""
+        )
+        posted_at = str(posted_at_raw)
+        try:
+            val = None
+            if isinstance(posted_at_raw, (int, float)):
+                val = float(posted_at_raw)
+            elif isinstance(posted_at_raw, str):
+                if posted_at_raw.isdigit():
+                    val = float(posted_at_raw)
+                elif "/Date(" in posted_at_raw:
+                    match = re.search(r'\/Date\((\d+)\)\/', posted_at_raw)
+                    if match:
+                        val = float(match.group(1))
+            if val:
+                if val > 10**11: val /= 1000.0
+                dt = datetime.fromtimestamp(val)
+                posted_at = dt.isoformat()
+        except:
+            pass
+
+        # Proposals count - deep search with TotalApplied priority
+        def find_quotes(obj):
+            if not isinstance(obj, dict): return 0
+            known = ["TotalApplied", "QuoteCount", "QuotesReceived", "QuotesCount", "NumberOfQuotes", "Proposals", "Quotes"]
+            for k in known:
+                val = obj.get(k)
+                if val is not None:
+                    if isinstance(val, (int, float)): return int(val)
+                    if isinstance(val, str) and val.isdigit(): return int(val)
+                    if isinstance(val, dict):
+                        res = val.get("count") or val.get("Count") or val.get("total") or 0
+                        if res: return int(res)
+            return 0
+
+        proposals = find_quotes(proj) or find_quotes(job) or 0
+
         return {
             "id": str(job_id),
             "title": proj.get("Title") or "Untitled",
             "description": proj.get("Description") or "",
             "budget": budget,
             "url": url,
-            "posted_at": proj.get("PostedDate") or "",
+            "posted_at": posted_at,
             "employer_name": emp.get("Name") or "Private Client",
-            "skills": skills
+            "skills": skills,
+            "total_proposals": proposals
         }
 
 guru_bidder = GuruAutoBidder()

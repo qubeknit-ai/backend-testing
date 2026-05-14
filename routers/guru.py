@@ -15,6 +15,7 @@ import json
 
 from database import SessionLocal
 from models import User, Lead, BidHistory, GuruCredentials, GuruAutoBidSettings
+from schemas import GuruAutoBidSettings as GuruAutoBidSettingsSchema
 from guru_autobid_service import guru_bidder
 from core.dependencies import get_db, get_user_by_email
 from auth_utils import verify_token
@@ -368,16 +369,56 @@ def _normalize_guru_job(job: dict) -> dict:
     # Employer info
     employer_name = proj.get("EmployerName") or job.get("EmployerName") or emp.get("Name") or emp.get("displayName") or emp.get("fullName") or "Private Client"
 
-    # Posted time
-    posted_at = (proj.get("PostedDate") or job.get("postedDate") or job.get("postDate") or 
-                 job.get("createdDate") or job.get("datePosted") or "")
+    # Posted time - Robust conversion
+    posted_at_raw = (
+        proj.get("PostedDate") or 
+        proj.get("DatePosted") or 
+        job.get("postedDate") or 
+        job.get("postDate") or 
+        job.get("createdDate") or 
+        job.get("datePosted") or 
+        proj.get("DatePostedFormatted") or
+        ""
+    )
+    posted_at = str(posted_at_raw)
+    try:
+        # Handle numeric timestamps (int, float, or string digits)
+        val = None
+        if isinstance(posted_at_raw, (int, float)):
+            val = float(posted_at_raw)
+        elif isinstance(posted_at_raw, str):
+            if posted_at_raw.isdigit():
+                val = float(posted_at_raw)
+            elif "/Date(" in posted_at_raw:
+                import re
+                match = re.search(r'\/Date\((\d+)\)\/', posted_at_raw)
+                if match:
+                    val = float(match.group(1))
+        
+        if val:
+            # If timestamp is very large, assume milliseconds
+            if val > 10**11: val /= 1000.0
+            dt = datetime.fromtimestamp(val)
+            posted_at = dt.isoformat()
+    except Exception as e:
+        print(f"DEBUG DATE ERROR: {e} for {posted_at_raw}")
+        pass
 
-    # Proposals count
-    q_count = proj.get("QuoteCount") or job.get("quotesCount") or job.get("Proposals") or 0
-    if isinstance(q_count, dict):
-        proposals = q_count.get("count") or q_count.get("Count") or 0
-    else:
-        proposals = q_count
+    # Proposals count - deep search with TotalApplied priority
+    def find_quotes(obj):
+        if not isinstance(obj, dict): return 0
+        known = ["TotalApplied", "QuoteCount", "QuotesReceived", "QuotesCount", "NumberOfQuotes", "Proposals", "Quotes"]
+        for k in known:
+            val = obj.get(k)
+            if val is not None:
+                if isinstance(val, (int, float)): return int(val)
+                if isinstance(val, str) and val.isdigit(): return int(val)
+                if isinstance(val, dict):
+                    res = val.get("count") or val.get("Count") or val.get("total") or 0
+                    if res: return int(res)
+        return 0
+
+    proposals = find_quotes(proj) or find_quotes(job) or 0
 
     # Job type
     job_type = proj.get("JobType") or job.get("jobType") or job.get("type") or ("Hourly" if is_hourly else "Fixed")
@@ -821,6 +862,59 @@ async def run_guru_autobid_cycle():
             "success": False,
             "error": str(e)
         }
+
+
+@router.get("/api/guru/autobid/settings")
+async def get_guru_autobid_settings(
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Get Guru AutoBid settings"""
+    user = get_user_by_email(email, db)
+    settings = db.query(GuruAutoBidSettings).filter(GuruAutoBidSettings.user_id == user.id).first()
+    if not settings:
+        settings = GuruAutoBidSettings(user_id=user.id)
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    
+    return {
+        "enabled": settings.enabled,
+        "daily_bids": settings.daily_bids,
+        "frequency_minutes": settings.frequency_minutes,
+        "smart_bidding": settings.smart_bidding,
+        "skill_matching": settings.skill_matching,
+        "proposal_type": settings.proposal_type,
+        "max_quotes": settings.max_quotes,
+        "max_project_age_hours": settings.max_project_age_hours
+    }
+
+
+@router.post("/api/guru/autobid/settings")
+async def update_guru_autobid_settings(
+    new_settings: GuruAutoBidSettingsSchema,
+    email: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Update Guru AutoBid settings"""
+    user = get_user_by_email(email, db)
+    settings = db.query(GuruAutoBidSettings).filter(GuruAutoBidSettings.user_id == user.id).first()
+    if not settings:
+        settings = GuruAutoBidSettings(user_id=user.id)
+        db.add(settings)
+    
+    # Update fields
+    if new_settings.enabled is not None: settings.enabled = new_settings.enabled
+    if new_settings.daily_bids is not None: settings.daily_bids = new_settings.daily_bids
+    if new_settings.frequency_minutes is not None: settings.frequency_minutes = new_settings.frequency_minutes
+    if new_settings.smart_bidding is not None: settings.smart_bidding = new_settings.smart_bidding
+    if new_settings.skill_matching is not None: settings.skill_matching = new_settings.skill_matching
+    if new_settings.proposal_type is not None: settings.proposal_type = new_settings.proposal_type
+    if new_settings.max_quotes is not None: settings.max_quotes = new_settings.max_quotes
+    if new_settings.max_project_age_hours is not None: settings.max_project_age_hours = new_settings.max_project_age_hours
+    
+    db.commit()
+    return {"success": True, "message": "Settings updated"}
 
 
 @router.post("/api/guru/autobid/start")

@@ -378,6 +378,8 @@ class GuruAutoBidSettings(Base):
     smart_bidding = Column(Boolean, default=True)
     skill_matching = Column(Boolean, default=True)
     proposal_type = Column(Integer, default=1)
+    max_quotes = Column(Integer, default=50)
+    max_project_age_hours = Column(Integer, default=48)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
