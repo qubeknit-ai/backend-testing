@@ -382,6 +382,12 @@ class GuruAutoBidder:
         slug = proj.get("Slug") or job.get("slug") or ""
         url = f"https://www.guru.com/d/jobs/id/{job_id}/" if job_id else f"https://www.guru.com/d/jobs/{slug}/"
         
+        skills_raw = proj.get("Skills") or job.get("skills") or []
+        if isinstance(skills_raw, list):
+            skills = [s.get("name") or s.get("title") or str(s) if isinstance(s, dict) else str(s) for s in skills_raw]
+        else:
+            skills = []
+
         return {
             "id": str(job_id),
             "title": proj.get("Title") or "Untitled",
@@ -390,7 +396,7 @@ class GuruAutoBidder:
             "url": url,
             "posted_at": proj.get("PostedDate") or "",
             "employer_name": emp.get("Name") or "Private Client",
-            "skills": [s.get("name") for s in proj.get("Skills", [])] if isinstance(proj.get("Skills"), list) else []
+            "skills": skills
         }
 
 guru_bidder = GuruAutoBidder()
