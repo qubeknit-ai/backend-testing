@@ -183,7 +183,14 @@ class GuruAutoBidder:
                     return "No recommended jobs found"
 
                 skip_counts = {"history": 0, "proposal_fail": 0, "bid_fail": 0, "too_old": 0, "too_many_quotes": 0}
+                fail_limit = 5
+                current_fails = 0
+                
                 for project in projects:
+                    if current_fails >= fail_limit:
+                        logger.warning(f"🛑 [GURU-AUTOBID] User {user_id}: Hit failure limit ({fail_limit}). Skipping remaining projects in this cycle.")
+                        break
+                        
                     project_id = project.get("id")
                     
                     # 1. History check
@@ -249,6 +256,7 @@ class GuruAutoBidder:
                     else:
                         error_msg = getattr(self, '_last_error', 'Quote failed')
                         logger.warning(f"❌ [GURU-AUTOBID] User {user_id}: Quote failed for '{project.get('title')}'. Reason: {error_msg}")
+                        current_fails += 1
                         skip_counts["bid_fail"] += 1
                 
                 reasons = []
