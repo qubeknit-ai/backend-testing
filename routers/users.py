@@ -9,6 +9,9 @@ import re
 import json
 from urllib.parse import unquote
 import time
+from functools import lru_cache
+from cache_utils import cached, cached_async
+
 
 from database import engine, SessionLocal
 from models import *
@@ -76,7 +79,84 @@ async def get_pipeline_stats(email: str = Depends(verify_token), db: Session = D
         traceback.print_exc()
         return {"pipeline": []}
 
+@lru_cache(maxsize=100)
+def get_dashboard_stats_cached(user_id: int, cache_key: str):
+    """Cached dashboard stats - cache_key includes timestamp for cache invalidation"""
+    from database import SessionLocal
+    from models import Lead
+    
+    db = SessionLocal()
+    try:
+        # Use optimized queries with database aggregation
+        base_query = db.query(Lead).filter(Lead.user_id == user_id, Lead.visible == True)
+        
+        # Get counts using database aggregation
+        total_leads = base_query.count()
+        ai_drafted = base_query.filter(Lead.status == "AI Drafted").count()
+        approved = base_query.filter(Lead.proposal_accepted == True).count()
+        
+        # Get low score count with database query
+        low_score = base_query.filter(
+            Lead.score.notin_(['—', '', None]),
+            func.cast(Lead.score, Float) < 7
+        ).count()
+        
+        # Platform distribution using database aggregation
+        platform_stats = db.query(
+            Lead.platform,
+            func.count(Lead.id).label('count')
+        ).filter(
+            Lead.user_id == user_id,
+            Lead.visible == True
+        ).group_by(Lead.platform).all()
+        
+        total_with_platform = sum(stat.count for stat in platform_stats)
+        platform_distribution = [
+            {
+                "name": stat.platform or "Unknown",
+                "value": round((stat.count / total_with_platform * 100), 1) if total_with_platform > 0 else 0,
+                "count": stat.count
+            }
+            for stat in platform_stats
+        ]
+        
+        # Timeline data (last 30 days) using database aggregation
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        timeline_stats = db.query(
+            func.date(Lead.created_at).label('date'),
+            func.count(Lead.id).label('total'),
+            func.sum(case((Lead.status.in_(["AI Drafted", "Approved"]), 1), else_=0)).label('proposals')
+        ).filter(
+            Lead.user_id == user_id,
+            Lead.visible == True,
+            Lead.created_at >= thirty_days_ago
+        ).group_by(func.date(Lead.created_at)).order_by(func.date(Lead.created_at)).all()
+        
+        timeline_data = [
+            {
+                "date": stat.date.strftime("%b %d") if stat.date else "Unknown",
+                "total": int(stat.total),
+                "proposals": int(stat.proposals or 0)
+            }
+            for stat in timeline_stats
+        ]
+        
+        if not timeline_data:
+            timeline_data = [{"date": datetime.utcnow().strftime("%b %d"), "total": 0, "proposals": 0}]
+        
+        return {
+            "total_leads": total_leads,
+            "ai_drafted": ai_drafted,
+            "low_score": low_score,
+            "approved": approved,
+            "platform_distribution": platform_distribution,
+            "timeline_data": timeline_data
+        }
+    finally:
+        db.close()
+
 @router.get("/api/dashboard/stats")
+
 async def get_dashboard_stats(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     try:
         if db is None:
@@ -309,6 +389,7 @@ async def update_settings(
     return settings
 
 @router.get("/api/profile", response_model=UserResponse)
+@cached_async(ttl=60, key_prefix="user_profile_")
 async def get_profile(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     """Get current user profile"""
     if db is None:
@@ -2607,127 +2688,120 @@ async def sync_freelancer_credentials(
             db.rollback()
         raise HTTPException(status_code=500, detail="Failed to sync credentials")
 
+@cached_async(ttl=300, key_prefix="fl_profile_")
+async def fetch_freelancer_profile_internal(user_id: int, access_token: str, cookies_json: str):
+    """Internal function to fetch freelancer profile with caching"""
+    headers = {"Content-Type": "application/json"}
+    cookies = {}
+    
+    if cookies_json:
+        try:
+            import json
+            cookie_data = json.loads(cookies_json)
+            # Set up cookies for the request
+            if cookie_data.get("GETAFREE_USER_ID"):
+                cookies["GETAFREE_USER_ID"] = cookie_data["GETAFREE_USER_ID"]
+            if cookie_data.get("GETAFREE_AUTH_HASH_V2"):
+                cookies["GETAFREE_AUTH_HASH_V2"] = cookie_data["GETAFREE_AUTH_HASH_V2"]
+            if cookie_data.get("XSRF_TOKEN"):
+                cookies["XSRF-TOKEN"] = cookie_data["XSRF_TOKEN"]
+                headers["X-XSRF-TOKEN"] = cookie_data["XSRF_TOKEN"]
+            if cookie_data.get("session2"):
+                cookies["session2"] = cookie_data["session2"]
+            if cookie_data.get("qfence"):
+                cookies["qfence"] = cookie_data["qfence"]
+        except Exception as e:
+            print(f"⚠️ Error parsing cookies in cached fetch: {e}")
+    
+    if access_token:
+        headers.update({
+            "Authorization": f"Bearer {access_token}",
+            "freelancer-oauth-v1": access_token
+        })
+    
+    print(f"🔄 Making EXTERNAL Freelancer API call for user {user_id}...")
+    
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(
+            "https://www.freelancer.com/api/users/0.1/self?limit=1&jobs=true&webapp=1&compact=true&new_errors=true&new_pools=true&avatar=true&profile_logo_url=true",
+            headers=headers,
+            cookies=cookies
+        )
+        
+        if response.status_code != 200:
+            print(f"❌ Freelancer API error: {response.status_code}")
+            return None
+        
+        data = response.json()
+        user_data = data.get("result")
+        
+        if not user_data:
+            return None
+        
+        # Try to get avatar URL if not present
+        if not any(key in user_data for key in ['avatar', 'avatar_url', 'profile_logo_url', 'logo_url']):
+            try:
+                avatar_response = await client.get(
+                    f"https://www.freelancer.com/api/users/0.1/users/{user_data.get('id')}?avatar=true&profile_logo_url=true",
+                    headers=headers,
+                    cookies=cookies
+                )
+                if avatar_response.status_code == 200:
+                    avatar_data = avatar_response.json()
+                    if avatar_data.get('result') and avatar_data['result'].get('users'):
+                        user_with_avatar = avatar_data['result']['users'][0]
+                        for key in ['avatar', 'avatar_url', 'profile_logo_url', 'logo_url']:
+                            if key in user_with_avatar:
+                                user_data[key] = user_with_avatar[key]
+            except Exception as e:
+                print(f"⚠️ Could not fetch avatar data in cached fetch: {e}")
+        
+        return user_data
+
 @router.get("/api/freelancer/profile")
 async def get_freelancer_profile(
     email: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Get live Freelancer profile data using stored credentials - same as extension"""
+    """Get live Freelancer profile data using stored credentials - with backend caching"""
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     try:
         from models import User, FreelancerCredentials
         
-        print(f"🔍 Looking for user with email: {email}")
         user = db.query(User).filter(User.email == email).first()
         if not user:
-            print(f"❌ User not found with email: {email}")
             raise HTTPException(status_code=404, detail="User not found")
-        
-        print(f"✅ Found user: {user.email} (ID: {user.id})")
         
         # Get stored Freelancer credentials
         credentials = db.query(FreelancerCredentials).filter(
             FreelancerCredentials.user_id == user.id
         ).first()
         
-        if not credentials:
-            print(f"❌ No FreelancerCredentials found for user ID: {user.id}")
-            raise HTTPException(status_code=404, detail="No Freelancer credentials found. Please connect using the browser extension first.")
+        if not credentials or not credentials.access_token:
+            raise HTTPException(status_code=404, detail="Freelancer credentials not found")
         
-        if not credentials.access_token:
-            print(f"❌ No access_token in credentials for user ID: {user.id}")
-            raise HTTPException(status_code=404, detail="No access token found. Please reconnect using the browser extension.")
-        
-        print(f"✅ Found credentials with access_token: {credentials.access_token[:20]}...")
-        
-        # Use the same approach as projects endpoint - cookies + OAuth fallback
-        headers = {"Content-Type": "application/json"}
-        cookies = {}
-        
-        # Use cookies if available (same as projects endpoint)
+        # Convert cookies to JSON string for stable cache key
+        cookies_json = ""
         if credentials.cookies:
-            try:
+            if isinstance(credentials.cookies, str):
+                cookies_json = credentials.cookies
+            else:
                 import json
-                cookie_data = credentials.cookies if isinstance(credentials.cookies, dict) else json.loads(credentials.cookies)
-                
-                # Set up cookies for the request (same as projects endpoint)
-                if cookie_data.get("GETAFREE_USER_ID"):
-                    cookies["GETAFREE_USER_ID"] = cookie_data["GETAFREE_USER_ID"]
-                if cookie_data.get("GETAFREE_AUTH_HASH_V2"):
-                    cookies["GETAFREE_AUTH_HASH_V2"] = cookie_data["GETAFREE_AUTH_HASH_V2"]
-                if cookie_data.get("XSRF_TOKEN"):
-                    cookies["XSRF-TOKEN"] = cookie_data["XSRF_TOKEN"]
-                    headers["X-XSRF-TOKEN"] = cookie_data["XSRF_TOKEN"]
-                if cookie_data.get("session2"):
-                    cookies["session2"] = cookie_data["session2"]
-                if cookie_data.get("qfence"):
-                    cookies["qfence"] = cookie_data["qfence"]
-                
-                print(f"🍪 Using cookies for API calls: {list(cookies.keys())}")
-            except Exception as e:
-                print(f"⚠️ Error parsing cookies: {e}")
+                cookies_json = json.dumps(credentials.cookies, sort_keys=True)
         
-        # Also add OAuth token as fallback (same as projects endpoint)
-        if credentials.access_token:
-            headers.update({
-                "Authorization": f"Bearer {credentials.access_token}",
-                "freelancer-oauth-v1": credentials.access_token
-            })
-            print(f"🔑 Using OAuth token for API calls")
+        # Call the cached internal function
+        profile_data = await fetch_freelancer_profile_internal(
+            user.id, 
+            credentials.access_token, 
+            cookies_json
+        )
         
-        print(f"🔄 Making Freelancer API call...")
-        
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # Try to get user data with avatar information
-            response = await client.get(
-                "https://www.freelancer.com/api/users/0.1/self?limit=1&jobs=true&webapp=1&compact=true&new_errors=true&new_pools=true&avatar=true&profile_logo_url=true",
-                headers=headers,
-                cookies=cookies
-            )
+        if not profile_data:
+            raise HTTPException(status_code=502, detail="Failed to fetch data from Freelancer API")
             
-            print(f"📡 Freelancer API response: {response.status_code}")
-            
-            if response.status_code == 401:
-                print(f"❌ Freelancer API returned 401 - session expired")
-                raise HTTPException(status_code=401, detail="Freelancer session expired - please reconnect using the extension")
-            
-            if response.status_code != 200:
-                print(f"❌ Freelancer API error: {response.status_code}")
-                raise HTTPException(status_code=response.status_code, detail=f"Freelancer API error: {response.status_code}")
-            
-            data = response.json()
-            user_data = data.get("result")
-            
-            if not user_data:
-                print(f"❌ No user data in Freelancer API response")
-                raise HTTPException(status_code=500, detail="No user data received from Freelancer API")
-            
-            print(f"✅ Successfully got Freelancer profile for: {user_data.get('username')}")
-            
-            # Try to get avatar URL if not present
-            if not any(key in user_data for key in ['avatar', 'avatar_url', 'profile_logo_url', 'logo_url']):
-                try:
-                    # Try to get avatar from users endpoint
-                    avatar_response = await client.get(
-                        f"https://www.freelancer.com/api/users/0.1/users/{user_data.get('id')}?avatar=true&profile_logo_url=true",
-                        headers=headers,
-                        cookies=cookies
-                    )
-                    if avatar_response.status_code == 200:
-                        avatar_data = avatar_response.json()
-                        if avatar_data.get('result') and avatar_data['result'].get('users'):
-                            user_with_avatar = avatar_data['result']['users'][0]
-                            # Merge avatar data into user_data
-                            for key in ['avatar', 'avatar_url', 'profile_logo_url', 'logo_url']:
-                                if key in user_with_avatar:
-                                    user_data[key] = user_with_avatar[key]
-                                    print(f"✅ Found avatar field: {key} = {user_with_avatar[key]}")
-                except Exception as e:
-                    print(f"⚠️ Could not fetch avatar data: {e}")
-            
-            return user_data
+        return profile_data
         
     except HTTPException:
         raise

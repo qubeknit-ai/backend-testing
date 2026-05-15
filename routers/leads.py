@@ -8,7 +8,7 @@ import os
 import re
 import json
 from urllib.parse import unquote
-import time
+from cache_utils import cached, cached_async
 
 from database import engine, SessionLocal
 from models import *
@@ -390,6 +390,7 @@ async def clean_leads(email: str = Depends(verify_token), db: Session = Depends(
         raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @router.get("/api/admin/stats")
+@cached_async(ttl=120, key_prefix="admin_stats_")
 async def get_admin_stats(user = Depends(verify_admin), db: Session = Depends(get_db)):
     """Get system-wide statistics for admin dashboard"""
     try:
@@ -469,6 +470,7 @@ async def get_admin_stats(user = Depends(verify_admin), db: Session = Depends(ge
         raise HTTPException(status_code=500, detail="Load On server Plz try again Later")
 
 @router.get("/api/admin/users")
+@cached_async(ttl=120, key_prefix="admin_users_")
 async def get_all_users(user = Depends(verify_admin), db: Session = Depends(get_db)):
     """Get all users with their stats"""
     try:

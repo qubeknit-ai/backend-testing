@@ -369,15 +369,17 @@ class AutoBidderSchedulerMixin:
             filter_stats.setdefault("already_attempted", 0)
             
             def _format_stats(stats):
-                parts = [f"Passed: {stats.get('passed', 0)}"]
-                if stats.get('skill_rejected', 0) > 0: parts.append(f"Skills: {stats['skill_rejected']}")
-                if stats.get('currency_rejected', 0) > 0: parts.append(f"Currency: {stats['currency_rejected']}")
-                if stats.get('age_rejected', 0) > 0: parts.append(f"Age>15m: {stats['age_rejected']}")
-                if stats.get('budget_rejected', 0) > 0: parts.append(f"Budget: {stats['budget_rejected']}")
-                if stats.get('bid_count_rejected', 0) > 0: parts.append(f"Competitors: {stats['bid_count_rejected']}")
-                if stats.get('payment_rejected', 0) > 0: parts.append(f"Unverified: {stats['payment_rejected']}")
-                if stats.get('hires_rejected', 0) > 0: parts.append(f"Hires: {stats['hires_rejected']}")
-                if stats.get('already_attempted', 0) > 0: parts.append(f"Attempted: {stats['already_attempted']}")
+                parts = [
+                    f"Passed: {stats.get('passed', 0)}",
+                    f"Skills: {stats.get('skill_rejected', 0)}",
+                    f"Currency: {stats.get('currency_rejected', 0)}",
+                    f"Age>15m: {stats.get('age_rejected', 0)}",
+                    f"Budget: {stats.get('budget_rejected', 0)}",
+                    f"Competitors: {stats.get('bid_count_rejected', 0)}",
+                    f"Unverified: {stats.get('payment_rejected', 0)}",
+                    f"Hires: {stats.get('hires_rejected', 0)}",
+                    f"Attempted: {stats.get('already_attempted', 0)}"
+                ]
                 return " | ".join(parts)
             
             if not filtered_projects:

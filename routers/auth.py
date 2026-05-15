@@ -9,7 +9,7 @@ import re
 import json
 import secrets
 from urllib.parse import unquote
-import time
+from cache_utils import cached, cached_async
 
 from database import engine, SessionLocal
 from models import *
@@ -78,6 +78,7 @@ async def debug_auth(request: Request):
         return {"status": "error", "error": str(e)}
 
 @router.get("/api/auth/me", response_model=UserResponse)
+@cached_async(ttl=60, key_prefix="auth_me_")
 async def get_current_user(email: str = Depends(verify_token), db: Session = Depends(get_db)):
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
