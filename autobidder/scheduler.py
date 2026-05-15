@@ -362,12 +362,28 @@ class AutoBidderSchedulerMixin:
             logger.info(f"📥 User {user_id}: Processing all {len(projects_to_process)} projects (filtering by bid history)")
 
             # 2. Filter projects by criteria for THIS user (including freshness check and skill matching)
-            filtered_projects = self._filter_projects(projects_to_process, settings, user_selected_skills, user_selected_skill_ids)
+            filtered_projects, filter_stats = self._filter_projects(projects_to_process, settings, user_selected_skills, user_selected_skill_ids)
+            
+            filter_stats.setdefault("payment_rejected", 0)
+            filter_stats.setdefault("hires_rejected", 0)
+            filter_stats.setdefault("already_attempted", 0)
+            
+            def _format_stats(stats):
+                parts = [f"Passed: {stats.get('passed', 0)}"]
+                if stats.get('skill_rejected', 0) > 0: parts.append(f"Skills: {stats['skill_rejected']}")
+                if stats.get('currency_rejected', 0) > 0: parts.append(f"Currency: {stats['currency_rejected']}")
+                if stats.get('age_rejected', 0) > 0: parts.append(f"Age>15m: {stats['age_rejected']}")
+                if stats.get('budget_rejected', 0) > 0: parts.append(f"Budget: {stats['budget_rejected']}")
+                if stats.get('bid_count_rejected', 0) > 0: parts.append(f"Competitors: {stats['bid_count_rejected']}")
+                if stats.get('payment_rejected', 0) > 0: parts.append(f"Unverified: {stats['payment_rejected']}")
+                if stats.get('hires_rejected', 0) > 0: parts.append(f"Hires: {stats['hires_rejected']}")
+                if stats.get('already_attempted', 0) > 0: parts.append(f"Attempted: {stats['already_attempted']}")
+                return " | ".join(parts)
             
             if not filtered_projects:
                 min_skill_match = settings.get("min_skill_match", 1)
                 logger.info(f"🔍 User {user_id}: No projects match criteria (Skill Match, Currency, or Age > 15min)")
-                return "NO_MATCHING_PROJECTS"
+                return f"No matching projects ({_format_stats(filter_stats)})"
 
             min_skill_match = settings.get("min_skill_match", 1)
             logger.info(f"✅ User {user_id}: {len(filtered_projects)} FRESH projects match criteria (currencies: {settings.get('currencies', ['USD'])}, min skills: {min_skill_match}, posted within 15 minutes)")
@@ -388,6 +404,8 @@ class AutoBidderSchedulerMixin:
                 # PERFORMANCE: Check in-memory set instead of database query
                 if project_id in bid_history_set:
                     logger.info(f"⏭️  User {user_id}: Skipping '{project_title}...' - Already attempted (in bid history)")
+                    filter_stats["already_attempted"] += 1
+                    filter_stats["passed"] -= 1
                     continue  # Move to next project
                 
                 # Log project details before attempting bid
@@ -413,12 +431,16 @@ class AutoBidderSchedulerMixin:
                         is_verified = owner.get("status", {}).get("payment_verified", False)
                         if not is_verified:
                             logger.info(f"⏭️  User {user_id}: Skipping '{project_title}...': Client payment not verified")
+                            filter_stats["payment_rejected"] += 1
+                            filter_stats["passed"] -= 1
                             continue
                             
                     if min_hires > 0:
                         reviews = owner.get("stats", {}).get("reviews", 0)
                         if reviews < min_hires:
                             logger.info(f"⏭️  User {user_id}: Skipping '{project_title}...': Client has {reviews} hires/reviews (min: {min_hires})")
+                            filter_stats["hires_rejected"] += 1
+                            filter_stats["passed"] -= 1
                             continue
                 
                 try:
@@ -467,7 +489,7 @@ class AutoBidderSchedulerMixin:
                 logger.info(f"   🆕 New projects to try: {len(filtered_projects) - skipped_count}")
             
             logger.info(f"🏁 --- Finished User {user_id} Cycle (No bids were placed) ---")
-            return "NO_BIDS_PLACED"
+            return f"No bids placed ({_format_stats(filter_stats)})"
 
         except Exception as e:
             logger.error(f"Error in bid cycle for User {user_id}: {e}")

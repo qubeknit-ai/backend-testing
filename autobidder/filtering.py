@@ -419,7 +419,7 @@ class AutoBidderFilterMixin:
         if filter_stats.get('budget_rejected', 0) > 0:
             logger.info(f"   💰 Min budget rejected: {filter_stats['budget_rejected']}")
         
-        return filtered
+        return filtered, filter_stats
 
     async def debug_skill_extraction(self, user_id: int, limit: int = 3):
         """Debug function to test skill extraction from projects"""
@@ -485,7 +485,7 @@ class AutoBidderFilterMixin:
             "min_skill_match": 1 if selected_skills else 0  # Set to 0 if no skills selected
         }
         
-        filtered = self._filter_projects(projects[:10], settings, selected_skills)
+        filtered, _ = self._filter_projects(projects[:10], settings, selected_skills)
         
         logger.info(f"🧪 TEST RESULTS:")
         logger.info(f"   📥 Total projects tested: {len(projects[:10])}")
