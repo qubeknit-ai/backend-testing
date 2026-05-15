@@ -309,3 +309,47 @@ class AutoBidderAPIMixin:
         
         logger.info("🔍 DEBUG: Project structure analysis complete")
 
+    async def _scrape_project_client_details(self, project: Dict) -> None:
+        """Scrape the public project page to get true client verification and review count.
+        Modifies the project dictionary in-place by updating or creating the 'owner' field."""
+        try:
+            import re
+            
+            project_id = project.get("id")
+            seo_url = project.get("seo_url")
+            project_url = f"https://www.freelancer.com/projects/{seo_url}" if seo_url else f"https://www.freelancer.com/projects/{project_id}"
+            
+            scrape_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
+            client = await self._get_http_client()
+            html_resp = await client.get(project_url, headers=scrape_headers)
+            
+            if html_resp.status_code == 200:
+                html = html_resp.text
+                
+                owner = project.get("owner")
+                if not owner:
+                    owner = {}
+                    project["owner"] = owner
+                    
+                # Extract Payment verified
+                payment_match = re.search(r'<span[^>]*data-color="([^"]+)"[^>]*title="Payment verified"', html)
+                if payment_match:
+                    is_verified = (payment_match.group(1) == 'success')
+                    if "status" not in owner:
+                        owner["status"] = {}
+                    owner["status"]["payment_verified"] = is_verified
+                    
+                # Extract Review count
+                review_match = re.search(r'<fl-review-count[^>]*>.*?<span[^>]*>\s*(\d+)\s*</span>', html, re.DOTALL)
+                if review_match:
+                    count = int(review_match.group(1))
+                    if "stats" not in owner:
+                        owner["stats"] = {}
+                    owner["stats"]["reviews"] = count  # Note: auto bidder uses owner["stats"]["reviews"]
+                    
+        except Exception as e:
+            logger.error(f"Error scraping project HTML for {project.get('id')}: {e}")
+

@@ -1560,13 +1560,13 @@ async def get_freelancer_projects(
             # Use skills-based search with jobs[] parameters for each skill ID
             skills_params = "&".join([f"jobs[]={skill_id}" for skill_id in user_skills])
             # Add explicit sorting to get NEWEST projects first (same as autobid service)
-            search_url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
+            search_url = f"https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&owners=true&user_details=true&user_reputation=true&user_status=true&user_verification=true&user_avatar=true&user_country_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&{skills_params}&languages[]=en"
             print(f"🎯 Searching projects with user skills: {user_skills}")
             print(f"🔗 Search URL: {search_url}")
         else:
             # Fallback to recommended projects if no skills found
             # Add explicit sorting to get NEWEST projects first (same as autobid service)
-            search_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&user_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
+            search_url = "https://www.freelancer.com/api/projects/0.1/projects/active/?compact=true&limit=20&owners=true&user_details=true&user_reputation=true&user_status=true&user_verification=true&user_avatar=true&user_country_details=true&jobs=true&sort_field=time_submitted&sort_order=desc&user_recommended=true"
             print("📋 Using recommended projects (no skills found)")
         
         # Apply additional filters if provided
@@ -1612,46 +1612,12 @@ async def get_freelancer_projects(
             
             print(f"✅ Successfully fetched {len(projects)} projects")
             
-            # Check if we have users data, if not fetch it separately
-            if not users and projects:
-                print("🔍 No users data in projects response, fetching client details...")
-                try:
-                    # Get unique owner IDs from projects
-                    owner_ids = list(set([
-                        str(project.get('owner_id')) 
-                        for project in projects 
-                        if project.get('owner_id')
-                    ]))
-                    
-                    if owner_ids:
-                        print(f"🔍 Fetching details for {len(owner_ids)} project owners: {owner_ids[:5]}...")
-                        # Build users API URL
-                        users_ids_param = "&".join([f"users[]={uid}" for uid in owner_ids[:20]])
-                        users_url = f"https://www.freelancer.com/api/users/0.1/users/?{users_ids_param}&avatar=true&country_details=true&reputation=true&display_info=true&status=true&verification=true&qualification_details=true&membership_details=true"
-                        
-                        users_response = await client.get(users_url, headers=headers, cookies=cookies)
-                        if users_response.status_code == 200:
-                            users_data = users_response.json()
-                            if 'result' in users_data and 'users' in users_data['result']:
-                                users = {
-                                    str(user['id']): user 
-                                    for user in users_data['result']['users']
-                                }
-                                print(f"✅ Successfully fetched {len(users)} client details")
-                            else:
-                                print("⚠️ No users found in users API response")
-                        else:
-                            print(f"⚠️ Failed to fetch client details: {users_response.status_code}")
-                except Exception as e:
-                    print(f"⚠️ Error fetching client details: {e}")
-            elif users:
-                print(f"✅ Users data already available: {len(users)} users")
-                # Convert users list to dict if needed
-                if isinstance(users, list):
-                    users = {
-                        str(user['id']): user 
-                        for user in users
-                    }
+            # Just convert users list to dict if needed
+            if isinstance(users, list):
+                users = {
+                    str(user['id']): user 
+                    for user in users
+                }
             
             # Add metadata about the search
             search_info = {
@@ -2801,13 +2767,81 @@ async def get_freelancer_project_details(
                 headers=headers,
                 params={
                     "full_description": "true",
-                    "project_details": "true"
+                    "project_details": "true",
+                    "owners": "true",
+                    "user_details": "true",
+                    "user_reputation": "true",
+                    "user_status": "true",
+                    "user_verification": "true",
+                    "user_country_details": "true",
+                    "user_avatar": "true"
                 }
             )
             
             if response.status_code == 200:
                 project_data = response.json()
-                project = project_data.get("result", {})
+                result = project_data.get("result", {})
+                project = result.get("projects", [{}])[0] if isinstance(result.get("projects"), list) else result.get("project", {})
+                users = result.get("users", {})
+                
+                # If project is empty, try to get it from result directly
+                if not project and "id" in result:
+                    project = result
+                
+                owner_id = str(project.get("owner_id"))
+                owner = users.get(owner_id) if isinstance(users, dict) else None
+                
+                # Fetch clean, full user data individually
+                if owner_id and owner_id != 'None':
+                    try:
+                        users_url = f"https://www.freelancer.com/api/users/0.1/users/?users[]={owner_id}&avatar=true&country_details=true&reputation=true&display_info=true&status=true&verification=true&qualification_details=true&membership_details=true"
+                        u_resp = await client.get(users_url, headers=headers)
+                        if u_resp.status_code == 200:
+                            u_data = u_resp.json()
+                            fetched_users = u_data.get('result', {}).get('users', [])
+                            if fetched_users:
+                                owner = fetched_users[0]
+                    except Exception as e:
+                        print(f"Error fetching clean owner data for project {project_id}: {e}")
+                        
+                # Scrape the public project page to get true client verification and review count
+                try:
+                    seo_url = project.get("seo_url")
+                    project_url = f"https://www.freelancer.com/projects/{seo_url}" if seo_url else f"https://www.freelancer.com/projects/{project_id}"
+                    
+                    scrape_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    }
+                    html_resp = await client.get(project_url, headers=scrape_headers)
+                    if html_resp.status_code == 200:
+                        import re
+                        html = html_resp.text
+                        
+                        if not owner:
+                            owner = {}
+                            
+                        # Extract Payment verified
+                        payment_match = re.search(r'<span[^>]*data-color="([^"]+)"[^>]*title="Payment verified"', html)
+                        if payment_match:
+                            is_verified = (payment_match.group(1) == 'success')
+                            if "status" not in owner:
+                                owner["status"] = {}
+                            owner["status"]["payment_verified"] = is_verified
+                            
+                        # Extract Review count
+                        review_match = re.search(r'<fl-review-count[^>]*>.*?<span[^>]*>\s*(\d+)\s*</span>', html, re.DOTALL)
+                        if review_match:
+                            count = int(review_match.group(1))
+                            if "reputation" not in owner:
+                                owner["reputation"] = {}
+                            if "entire_site" not in owner["reputation"]:
+                                owner["reputation"]["entire_site"] = {"overall": {}}
+                            elif "overall" not in owner["reputation"]["entire_site"]:
+                                owner["reputation"]["entire_site"]["overall"] = {}
+                            owner["reputation"]["entire_site"]["overall"]["count"] = count
+                            
+                except Exception as e:
+                    print(f"Error scraping project HTML for {project_id}: {e}")
                 
                 return {
                     "id": project.get("id"),
@@ -2817,7 +2851,8 @@ async def get_freelancer_project_details(
                     "budget": project.get("budget", {}),
                     "time_submitted": project.get("time_submitted"),
                     "jobs": project.get("jobs", []),
-                    "owner_id": project.get("owner_id")
+                    "owner_id": project.get("owner_id"),
+                    "owner": owner
                 }
             else:
                 print(f"Failed to fetch project details: {response.status_code} - {response.text}")

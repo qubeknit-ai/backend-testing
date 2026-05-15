@@ -399,6 +399,28 @@ class AutoBidderSchedulerMixin:
                 
                 logger.info(f"🎯 User {user_id}: Bidding on '{project_title}...' - {posted_time} - {budget_str} ({project_currency}) - {project.get('bid_stats', {}).get('bid_count', 0)} bids")
                 
+                # 4.5. Check payment_verified and min_hires using HTML scraping
+                payment_verified_only = settings.get("payment_verified", False)
+                min_hires = settings.get("min_hires", 0)
+                
+                if payment_verified_only or min_hires > 0:
+                    logger.info(f"🔍 User {user_id}: Scraping project client details for payment/hires filters...")
+                    await self._scrape_project_client_details(project)
+                    
+                    owner = project.get("owner", {})
+                    
+                    if payment_verified_only:
+                        is_verified = owner.get("status", {}).get("payment_verified", False)
+                        if not is_verified:
+                            logger.info(f"⏭️  User {user_id}: Skipping '{project_title}...': Client payment not verified")
+                            continue
+                            
+                    if min_hires > 0:
+                        reviews = owner.get("stats", {}).get("reviews", 0)
+                        if reviews < min_hires:
+                            logger.info(f"⏭️  User {user_id}: Skipping '{project_title}...': Client has {reviews} hires/reviews (min: {min_hires})")
+                            continue
+                
                 try:
                     bid_result = await self._bid_on_project(user_id, project, settings)
                     if bid_result == True:
