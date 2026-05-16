@@ -385,14 +385,14 @@ class AutoBidderFilterMixin:
 
 
 
-            # 7. Check minimum budget
+            # 7. Check budget (Compare settings.min_budget against project's maximum budget)
             min_budget = settings.get("min_budget", 0.0)
             if min_budget > 0:
                 budget = project.get("budget", {})
-                # Use minimum budget for filtering
-                proj_min_budget = budget.get("minimum", 0)
-                if proj_min_budget < min_budget:
-                    logger.info(f"⏭️  Skipping project: Budget ${proj_min_budget} below minimum ${min_budget}")
+                # Use maximum budget for filtering to allow projects that *could* pay enough
+                proj_max_budget = budget.get("maximum", 0)
+                if proj_max_budget < min_budget:
+                    logger.info(f"⏭️  Skipping project: Max budget ${proj_max_budget} is below your required ${min_budget}")
                     if "budget_rejected" not in filter_stats:
                         filter_stats["budget_rejected"] = 0
                     filter_stats["budget_rejected"] += 1
